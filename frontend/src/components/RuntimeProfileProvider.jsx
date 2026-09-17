@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { setApiRuntimeProfile } from '../utils/api'
 import { RuntimeProfileContext } from './runtimeProfileContext'
 
@@ -72,7 +72,15 @@ export default function RuntimeProfileProvider({ children }) {
     }
   }, [])
 
-  const value = useMemo(() => state, [state])
+  // Register/login answer 409 LocalProfileAuthUnavailable only on the desktop
+  // build. That is as authoritative as /api/v1/runtime, so a page that receives
+  // it can switch to local mode even when capability discovery itself failed.
+  const markLocal = useCallback(() => {
+    setApiRuntimeProfile('local')
+    setState({ ...normalizeRuntimeProfile({ profile: 'local' }), loading: false })
+  }, [])
+
+  const value = useMemo(() => ({ ...state, markLocal }), [state, markLocal])
 
   return (
     <RuntimeProfileContext.Provider value={value}>

@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { BookOpen, Eye, EyeOff } from 'lucide-react'
-import { Button, Card, Input, ThemeToggle } from '../components'
-import { api } from '../utils/api'
+import { Button, Card, Input, ThemeToggle, useRuntimeProfile } from '../components'
+import { api, LOCAL_PROFILE_AUTH_CODE } from '../utils/api'
 import { setToken } from '../utils/auth'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -16,6 +16,7 @@ export default function Register() {
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const navigate = useNavigate()
+  const { markLocal } = useRuntimeProfile()
   const location = useLocation()
   const from = location.state?.from || '/dashboard'
 
@@ -51,6 +52,11 @@ export default function Register() {
       setToken(response.access_token || response.token, response.shuake_token)
       navigate(from, { replace: true })
     } catch (requestError) {
+      if (requestError?.payload?.code === LOCAL_PROFILE_AUTH_CODE) {
+        markLocal()
+        navigate('/dashboard', { replace: true })
+        return
+      }
       setError(requestError.message || '注册失败，请稍后重试。')
     } finally {
       setSubmitting(false)
