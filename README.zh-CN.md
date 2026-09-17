@@ -24,10 +24,10 @@ University Helper 是一个基于 FastAPI 和 React 的全栈校园辅助项目�
 
 | 系统 | 下载文件 | 说明 |
 |---|---|---|
-| Windows 10/11 | `University.Helper_<ver>_x64-setup.exe` / `.msi` | 未签名：SmartScreen 中点 **更多信息 → 仍要运行** |
-| macOS Apple Silicon | `University.Helper_<ver>_aarch64.dmg` | 未签名：首次启动右键 App → **打开** |
-| macOS Intel | `University.Helper_<ver>_x64.dmg` | 同样右键 → **打开** |
-| Linux | `university-helper_<ver>_amd64.AppImage` / `.deb` | `chmod +x *.AppImage && ./*.AppImage` |
+| Windows 10/11 | `xuedao_<ver>_windows_x64-setup.exe` / `xuedao_<ver>_windows_x64.msi` | 未签名：SmartScreen 中点 **更多信息 → 仍要运行** |
+| macOS Apple Silicon | `xuedao_<ver>_darwin_aarch64.dmg` | 未签名：首次启动右键 App → **打开** |
+| macOS Intel | `xuedao_<ver>_darwin_x64.dmg` | 同样右键 → **打开** |
+| Linux | `xuedao_<ver>_linux_amd64.AppImage` / `.deb` | `chmod +x *.AppImage && ./*.AppImage` |
 
 macOS 版本当前是免费 ad-hoc/未公证发布。优先尝试 **右键 App → 打开**。
 如果系统提示“已损坏，无法打开”或“移到废纸篓”，先把 App 拖到“应用程序”，

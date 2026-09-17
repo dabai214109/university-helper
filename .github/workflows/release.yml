@@ -4,9 +4,11 @@ name: release
 #   create-release  → makes a DRAFT GitHub Release, stamps version, extracts notes
 #   app-image       → multi-arch server image to GHCR (:version, digest output)
 #   web-image       → multi-arch web image to GHCR (:version, digest output)
-#   desktop         → Win/macOS(x2)/Linux installers + updater artifacts (Tauri)
+#   desktop         → Win/macOS(x2)/Linux installers + signed updater bundles (Tauri)
+#   updater-manifest→ the ONLY writer of latest.json, after every desktop build;
+#                     verifies each .sig against the pubkey in tauri.conf.json
 #   promote-images  → after every build gate, retags those exact digests as :latest
-#   publish         → flips the draft to published after promotion succeeds
+#   publish         → flips the draft to published, then checks the live latest.json
 #
 # First-run prerequisite: Settings → Actions → General → Workflow permissions =
 # "Read and write". GHCR packages default to PRIVATE — make
@@ -40,6 +42,7 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       release_id: ${{ steps.release.outputs.id }}
+      updater: ${{ steps.signing.outputs.updater }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,6 +66,26 @@ jobs:
           printf 'tag=%s\n' "$REF" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
           printf 'image_version=%s\n' "$IMAGE_VERSION" >> "$GITHUB_OUTPUT"
+
+      # Installed desktop apps only update from signed bundles. The upstream
+      # repository must never publish a release without them; forks without the
+      # secret still get installers, just no auto-update.
+      - name: Require the updater signing key upstream
+        id: signing
+        env:
+          SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SIGN_KEY" ]; then
+            echo "updater=true" >> "$GITHUB_OUTPUT"
+          elif [ "$REPOSITORY" = "sweetcornna/university-helper" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Without it installed desktop apps cannot auto-update. Add it under Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          else
+            echo "updater=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY in this fork: installers will be unsigned and the release has no latest.json."
+          fi
 
       # Validates set_version.sh runs against the real tree on every release.
       # (The build jobs below re-stamp their own fresh checkouts.)
@@ -394,6 +417,13 @@ jobs:
         with:
           projectPath: frontend
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          # The product name 学道 is not ASCII and GitHub strips it from asset
+          # names, which used to leave files like "_1.4.6_x64.dmg" and broke the
+          # updater. Name assets explicitly instead.
+          assetNamePattern: "xuedao_[version]_[platform]_[arch][setup][ext]"
+          # Four matrix jobs writing latest.json race each other; the
+          # updater-manifest job below writes it once.
+          includeUpdaterJson: false
           args: >-
             --target ${{ matrix.rust_target }}
             ${{ steps.signing.outputs.updater == 'false' && '--config {"bundle":{"createUpdaterArtifacts":false}}' || '' }}
@@ -408,10 +438,48 @@ jobs:
           [ -x "$BIN" ] || { echo "missing signed sidecar: $BIN" >&2; exit 1; }
           bash scripts/smoke_sidecar.sh "$BIN"
 
-  # ───────────────────────── 4. promote (gate on everything) ────────────────
+  # ───────────────────────── 4. updater manifest (single writer) ─────────────
+  updater-manifest:
+    runs-on: ubuntu-latest
+    needs: [create-release, desktop]
+    permissions:
+      contents: write
+    env:
+      UPDATER: ${{ needs.create-release.outputs.updater }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install minisign
+        if: env.UPDATER == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Assemble, verify and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$UPDATER" != "true" ]; then
+            echo "::notice::Unsigned build: no latest.json for this release."
+            exit 0
+          fi
+          python3 scripts/updater_manifest.py assemble \
+            --repository "$REPOSITORY" \
+            --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" \
+            --version "$VERSION"
+
+  # ───────────────────────── 5. promote (gate on everything) ────────────────
   promote-images:
     runs-on: ubuntu-latest
-    needs: [create-release, app-image, web-image, desktop]
+    needs: [create-release, app-image, web-image, desktop, updater-manifest]
     permissions:
       packages: write
     env:
@@ -454,13 +522,17 @@ jobs:
             --tag "${WEB_IMAGE}:latest" \
             "${WEB_IMAGE}@${WEB_DIGEST}"
 
-  # ───────────────────────── 5. publish (gate on everything) ─────────────────
+  # ───────────────────────── 6. publish (gate on everything) ─────────────────
   publish:
     runs-on: ubuntu-latest
-    needs: [create-release, app-image, web-image, desktop, promote-images]
+    needs: [create-release, app-image, web-image, desktop, updater-manifest, promote-images]
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
       - name: Flip draft → published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -470,3 +542,26 @@ jobs:
           gh release edit "$RELEASE_TAG" \
             --repo "$REPOSITORY" \
             --draft=false --latest
+
+      # Clients poll releases/latest/download/latest.json. If that is not
+      # usable right after publishing, put the release back to draft so the
+      # previous release stays "latest", and fail loudly.
+      - name: Verify the live updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          UPDATER: ${{ needs.create-release.outputs.updater }}
+        run: |
+          set -euo pipefail
+          if [ "$UPDATER" != "true" ]; then
+            echo "::notice::Unsigned build: no updater manifest to check."
+            exit 0
+          fi
+          if python3 scripts/updater_manifest.py verify --repository "$REPOSITORY" --version "$VERSION"; then
+            exit 0
+          fi
+          echo "::error::latest.json for $RELEASE_TAG is missing or broken; moving the release back to draft."
+          gh release edit "$RELEASE_TAG" --repo "$REPOSITORY" --draft=true
+          exit 1

@@ -420,6 +420,7 @@ def test_release_publish_job_waits_for_both_release_image_jobs():
         "app-image",
         "web-image",
         "desktop",
+        "updater-manifest",
         "promote-images",
     }
 
@@ -451,7 +452,7 @@ def test_release_promotion_waits_for_every_build_gate_and_uses_only_digests():
     promotion_job = _job_block("promote-images")
     promotion_script = _workflow_run_block("promote-images", "Promote immutable image digests to latest")
 
-    assert _job_needs("promote-images") == {"create-release", "app-image", "web-image", "desktop"}
+    assert _job_needs("promote-images") == {"create-release", "app-image", "web-image", "desktop", "updater-manifest"}
     assert "APP_DIGEST: ${{ needs.app-image.outputs.digest }}" in promotion_job
     assert "WEB_DIGEST: ${{ needs.web-image.outputs.digest }}" in promotion_job
     assert "APP_VERSION: ${{ needs.app-image.outputs.image_version }}" in promotion_job
@@ -513,7 +514,7 @@ def test_release_workflow_dispatch_checkouts_use_requested_release_ref():
 def test_release_workflow_run_blocks_do_not_interpolate_github_expressions():
     blocks = _workflow_run_blocks()
 
-    assert len(blocks) == 18
+    assert len(blocks) == 22
     for job_name, step_name, script in blocks:
         assert "${{" not in script, f"direct GitHub expression in {job_name}/{step_name}"
 

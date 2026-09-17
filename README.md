@@ -41,10 +41,10 @@ It bundles the backend and runs locally without Docker, Postgres, or Python.
 
 | OS | Download | Notes |
 |---|---|---|
-| Windows 10/11 | `University.Helper_<ver>_x64-setup.exe` / `.msi` | unsigned: SmartScreen → **More info → Run anyway** |
-| macOS (Apple Silicon) | `University.Helper_<ver>_aarch64.dmg` | unsigned: right-click the app → **Open** on first launch |
-| macOS (Intel) | `University.Helper_<ver>_x64.dmg` | same right-click → **Open** |
-| Linux | `university-helper_<ver>_amd64.AppImage` / `.deb` | `chmod +x *.AppImage && ./*.AppImage` |
+| Windows 10/11 | `xuedao_<ver>_windows_x64-setup.exe` / `xuedao_<ver>_windows_x64.msi` | unsigned: SmartScreen → **More info → Run anyway** |
+| macOS (Apple Silicon) | `xuedao_<ver>_darwin_aarch64.dmg` | unsigned: right-click the app → **Open** on first launch |
+| macOS (Intel) | `xuedao_<ver>_darwin_x64.dmg` | same right-click → **Open** |
+| Linux | `xuedao_<ver>_linux_amd64.AppImage` / `.deb` | `chmod +x *.AppImage && ./*.AppImage` |
 
 Installers are published for each listed platform. Signed updater artifacts and
 automatic updates are available only for releases where the repository's Tauri
