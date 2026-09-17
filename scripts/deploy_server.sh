@@ -217,19 +217,13 @@ resolve_source_tag() {
   printf '%s' "$tag"
 }
 
-bootstrap_source() {
-  # $@ = the original command-line arguments
-  [[ "${UH_BOOTSTRAPPED:-0}" == "1" ]] && \
-    die "The downloaded source is incomplete: ${COMPOSE_FILE} or database/ is missing."
-  [[ "${UH_DEPLOY_OFFLINE:-0}" == "1" ]] && \
-    die "${COMPOSE_FILE} and database/ were not found next to this script, and UH_DEPLOY_OFFLINE=1 forbids downloading them. Run the script from a full checkout."
+download_source() {
+  # download_source <vTAG> <target dir>: unpack that release's source over target.
+  local tag="$1" target="$2" archive
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]] || \
+    die "Could not determine which release to download (got '${tag}'). Pass --tag, e.g. --tag 1.4.7."
   command -v curl >/dev/null 2>&1 || die "curl is required to download University Helper."
   command -v tar >/dev/null 2>&1 || die "tar is required to unpack University Helper."
-
-  local tag target archive
-  tag="$(resolve_source_tag)"
-  target="${UH_INSTALL_DIR:-$PWD/university-helper}"
-  info "Deployment files not found here; downloading University Helper ${tag} into ${target} …"
   mkdir -p "$target"
   archive="$(mktemp "${TMPDIR:-/tmp}/uh-source.XXXXXX")"
   if ! curl -fsSL "https://github.com/${REPO_SLUG}/archive/refs/tags/${tag}.tar.gz" -o "$archive"; then
@@ -245,7 +239,12 @@ bootstrap_source() {
   printf '%s\n' "$tag" > "$target/.uh-source-tag"
   is_complete_root "$target" || die "The downloaded source is incomplete: ${COMPOSE_FILE} or database/ is missing."
   ok "Source ready in ${target}"
+}
 
+reexec_from() {
+  # reexec_from <target dir> <vTAG> <original args...>: run the downloaded script.
+  local target="$1" tag="$2"
+  shift 2
   local -a next_args=()
   [[ $# -gt 0 ]] && next_args=("$@")
   if [[ "$TAG_PROVIDED" != "1" ]]; then
@@ -254,9 +253,63 @@ bootstrap_source() {
   export UH_BOOTSTRAPPED=1
   if [[ ! -t 0 ]] && { true < /dev/tty; } 2>/dev/null; then
     # Piped install (curl | bash): give prompts the terminal back.
-    exec bash "$target/scripts/deploy_server.sh" "${next_args[@]}" < /dev/tty
+    exec bash "$target/scripts/deploy_server.sh" ${next_args[@]+"${next_args[@]}"} < /dev/tty
   fi
-  exec bash "$target/scripts/deploy_server.sh" "${next_args[@]}"
+  exec bash "$target/scripts/deploy_server.sh" ${next_args[@]+"${next_args[@]}"}
+}
+
+bootstrap_source() {
+  # $@ = the original command-line arguments
+  [[ "${UH_BOOTSTRAPPED:-0}" == "1" ]] && \
+    die "The downloaded source is incomplete: ${COMPOSE_FILE} or database/ is missing."
+  [[ "${UH_DEPLOY_OFFLINE:-0}" == "1" ]] && \
+    die "${COMPOSE_FILE} and database/ were not found next to this script, and UH_DEPLOY_OFFLINE=1 forbids downloading them. Run the script from a full checkout."
+  command -v curl >/dev/null 2>&1 || die "curl is required to download University Helper."
+
+  local tag target
+  tag="$(resolve_source_tag)"
+  target="${UH_INSTALL_DIR:-$PWD/university-helper}"
+  info "Deployment files not found here; downloading University Helper ${tag} into ${target} …"
+  download_source "$tag" "$target"
+  reexec_from "$target" "$tag" "$@"
+}
+
+refresh_source_if_outdated() {
+  # refresh_source_if_outdated <repo root> <original args...>
+  # Updating an install means new compose files and scripts as well as new
+  # images. A directory this script downloaded (it has .uh-source-tag) is moved
+  # to the requested release first; a git checkout is the user's to update.
+  local root="$1" wanted="" current=""
+  shift
+  if [[ "$TAG_PROVIDED" == "1" && "$TAG" != "latest" ]]; then
+    wanted="$TAG"
+  elif [[ -n "$UH_BUNDLED_TAG" ]]; then
+    wanted="$UH_BUNDLED_TAG"
+  fi
+  [[ -n "$wanted" ]] || return 0
+  [[ "$wanted" == v* ]] || wanted="v${wanted}"
+
+  if [[ ! -f "$root/.uh-source-tag" ]]; then
+    if [[ -d "$root/.git" ]]; then
+      local checkout_version
+      checkout_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/backend/pyproject.toml" 2>/dev/null | head -n 1)"
+      if [[ -n "$checkout_version" && "v${checkout_version}" != "$wanted" ]]; then
+        warn "This git checkout is version ${checkout_version}, but you asked for ${wanted}. Compose files and scripts come from the checkout; run 'git fetch --tags && git checkout ${wanted}' first to match them."
+      fi
+    fi
+    return 0
+  fi
+  [[ "${UH_BOOTSTRAPPED:-0}" == "1" ]] && return 0
+
+  current="$(tr -d '[:space:]' < "$root/.uh-source-tag")"
+  [[ "$current" == "$wanted" ]] && return 0
+  if [[ "${UH_DEPLOY_OFFLINE:-0}" == "1" ]]; then
+    warn "UH_DEPLOY_OFFLINE=1: keeping the ${current} deployment files while deploying ${wanted} images."
+    return 0
+  fi
+  info "Updating the deployment files in ${root} from ${current:-unknown} to ${wanted} …"
+  download_source "$wanted" "$root"
+  reexec_from "$root" "$wanted" "$@"
 }
 
 # ---- platform detection ---------------------------------------------------
@@ -681,6 +734,7 @@ main() {
   if ! repo_root="$(resolve_repo_root)"; then
     bootstrap_source ${original_args[@]+"${original_args[@]}"}
   fi
+  refresh_source_if_outdated "$repo_root" ${original_args[@]+"${original_args[@]}"}
   cd "$repo_root"
 
   RAW_TAG="$TAG"

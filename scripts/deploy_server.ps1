@@ -112,6 +112,48 @@ function Test-CompleteRoot([string]$Dir) {
   return $true
 }
 
+function Save-SourceRelease([string]$SourceTag, [string]$Target) {
+  if (-not [Regex]::IsMatch($SourceTag, '\Av\d+\.\d+\.\d+([-+.][0-9A-Za-z.-]+)?\z')) {
+    Die "Could not determine which release to download (got '$SourceTag'). Pass -Tag, e.g. -Tag 1.4.7."
+  }
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("uh-source-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+  $zip = Join-Path $tmp "source.zip"
+  try {
+    Invoke-WebRequest -UseBasicParsing -OutFile $zip "https://github.com/$RepoSlug/archive/refs/tags/$SourceTag.zip"
+  } catch {
+    Die "Download failed: https://github.com/$RepoSlug/archive/refs/tags/$SourceTag.zip"
+  }
+  Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "src") -Force
+  $top = Get-ChildItem -LiteralPath (Join-Path $tmp "src") -Directory | Select-Object -First 1
+  New-Item -ItemType Directory -Path $Target -Force | Out-Null
+  # The archive never contains .env, so an existing configuration is kept.
+  Copy-Item -Path (Join-Path $top.FullName '*') -Destination $Target -Recurse -Force
+  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  Set-Content -LiteralPath (Join-Path $Target ".uh-source-tag") -Value $SourceTag -Encoding ascii
+  if (-not (Test-CompleteRoot $Target)) {
+    Die "The downloaded source is incomplete: $ComposeFile or database/ is missing."
+  }
+  Ok "Source ready in $Target"
+}
+
+function Invoke-DownloadedScript([string]$Target, [string]$SourceTag) {
+  $childArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $Target "scripts/deploy_server.ps1"))
+  foreach ($entry in $BoundParams.GetEnumerator()) {
+    if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
+      if ($entry.Value.IsPresent) { $childArgs += "-$($entry.Key)" }
+    } else {
+      $childArgs += "-$($entry.Key)"
+      $childArgs += [string]$entry.Value
+    }
+  }
+  if (-not $TagProvided) { $childArgs += @("-Tag", $SourceTag) }
+  $env:UH_BOOTSTRAPPED = "1"
+  $hostExe = (Get-Process -Id $PID).Path
+  & $hostExe @childArgs
+  exit $LASTEXITCODE
+}
+
 function Invoke-SourceBootstrap {
   if ($env:UH_BOOTSTRAPPED -eq "1") {
     Die "The downloaded source is incomplete: $ComposeFile or database/ is missing."
@@ -136,40 +178,41 @@ function Invoke-SourceBootstrap {
 
   $target = if ($env:UH_INSTALL_DIR) { $env:UH_INSTALL_DIR } else { Join-Path (Get-Location).Path "university-helper" }
   Info "Deployment files not found here; downloading University Helper $sourceTag into $target ..."
-  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("uh-source-" + [Guid]::NewGuid().ToString("N"))
-  New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-  $zip = Join-Path $tmp "source.zip"
-  try {
-    Invoke-WebRequest -UseBasicParsing -OutFile $zip "https://github.com/$RepoSlug/archive/refs/tags/$sourceTag.zip"
-  } catch {
-    Die "Download failed: https://github.com/$RepoSlug/archive/refs/tags/$sourceTag.zip"
-  }
-  Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "src") -Force
-  $top = Get-ChildItem -LiteralPath (Join-Path $tmp "src") -Directory | Select-Object -First 1
-  New-Item -ItemType Directory -Path $target -Force | Out-Null
-  # The archive never contains .env, so an existing configuration is kept.
-  Copy-Item -Path (Join-Path $top.FullName '*') -Destination $target -Recurse -Force
-  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  Set-Content -LiteralPath (Join-Path $target ".uh-source-tag") -Value $sourceTag -Encoding ascii
-  if (-not (Test-CompleteRoot $target)) {
-    Die "The downloaded source is incomplete: $ComposeFile or database/ is missing."
-  }
-  Ok "Source ready in $target"
+  Save-SourceRelease $sourceTag $target
+  Invoke-DownloadedScript $target $sourceTag
+}
 
-  $childArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $target "scripts/deploy_server.ps1"))
-  foreach ($entry in $BoundParams.GetEnumerator()) {
-    if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
-      if ($entry.Value.IsPresent) { $childArgs += "-$($entry.Key)" }
-    } else {
-      $childArgs += "-$($entry.Key)"
-      $childArgs += [string]$entry.Value
+# Updating an install means new compose files and scripts as well as new
+# images. A directory this script downloaded (it has .uh-source-tag) is moved to
+# the requested release first; a git checkout is the user's to update.
+function Update-SourceIfOutdated([string]$Root) {
+  $wanted = ""
+  if ($TagProvided -and $Tag -ne "latest") { $wanted = $Tag } elseif ($BundledTag) { $wanted = $BundledTag }
+  if (-not $wanted) { return }
+  if (-not $wanted.StartsWith("v")) { $wanted = "v$wanted" }
+
+  $marker = Join-Path $Root ".uh-source-tag"
+  if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+    $pyproject = Join-Path $Root "backend/pyproject.toml"
+    if ((Test-Path -LiteralPath (Join-Path $Root ".git")) -and (Test-Path -LiteralPath $pyproject -PathType Leaf)) {
+      $match = Select-String -LiteralPath $pyproject -Pattern '^version = "(.*)"$' | Select-Object -First 1
+      if ($match -and "v$($match.Matches[0].Groups[1].Value)" -ne $wanted) {
+        Warn "This git checkout is version $($match.Matches[0].Groups[1].Value), but you asked for $wanted. Compose files and scripts come from the checkout; run 'git fetch --tags; git checkout $wanted' first to match them."
+      }
     }
+    return
   }
-  if (-not $TagProvided) { $childArgs += @("-Tag", $sourceTag) }
-  $env:UH_BOOTSTRAPPED = "1"
-  $hostExe = (Get-Process -Id $PID).Path
-  & $hostExe @childArgs
-  exit $LASTEXITCODE
+  if ($env:UH_BOOTSTRAPPED -eq "1") { return }
+
+  $current = (Get-Content -LiteralPath $marker -Raw).Trim()
+  if ($current -eq $wanted) { return }
+  if ($env:UH_DEPLOY_OFFLINE -eq "1") {
+    Warn "UH_DEPLOY_OFFLINE=1: keeping the $current deployment files while deploying $wanted images."
+    return
+  }
+  Info "Updating the deployment files in $Root from $current to $wanted ..."
+  Save-SourceRelease $wanted $Root
+  Invoke-DownloadedScript $Root $wanted
 }
 
 $Candidates = @()
@@ -180,6 +223,7 @@ foreach ($candidate in $Candidates) {
   if (Test-CompleteRoot $candidate) { $RepoRoot = (Resolve-Path -LiteralPath $candidate).Path; break }
 }
 if (-not $RepoRoot) { Invoke-SourceBootstrap }
+Update-SourceIfOutdated $RepoRoot
 
 Set-Location $RepoRoot
 

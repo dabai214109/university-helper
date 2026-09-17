@@ -71,13 +71,19 @@ def _fixture(tmp_path: Path, *, volume_exists: bool = False, with_repo: bool = T
             """
             $ErrorActionPreference = 'Stop'
             function Invoke-WebRequest {
-              param([Parameter(Position=0)][string]$Uri, [switch]$UseBasicParsing, [int]$TimeoutSec)
+              param([Parameter(Position=0)][string]$Uri, [switch]$UseBasicParsing, [int]$TimeoutSec, [string]$OutFile)
+              if ($OutFile) {
+                Add-Content -LiteralPath $env:T_WEBLOG -Value $Uri
+                Copy-Item -LiteralPath $env:T_ZIP -Destination $OutFile
+                return
+              }
               [pscustomobject]@{ StatusCode = 200; Content = '{"status":"ok","schema":"ok"}' }
             }
             function Start-Sleep { param([int]$Seconds) }
             $params = @{ Yes = $true }
             if ($env:T_DOMAIN) { $params.Domain = $env:T_DOMAIN }
             if ($env:T_ADMIN) { $params.AdminEmail = $env:T_ADMIN }
+            if ($env:T_TAG) { $params.Tag = $env:T_TAG }
             & (Join-Path $PSScriptRoot 'scripts/deploy_server.ps1') @params
             if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             if (-not $?) { exit 1 }
@@ -156,3 +162,46 @@ def test_powershell_offline_mode_refuses_to_download(tmp_path):
     assert result.returncode != 0
     assert "UH_DEPLOY_OFFLINE=1" in result.stdout
     assert not log.exists()
+
+
+def _release_zip(tmp_path: Path) -> Path:
+    # A fake GitHub source zip whose installer only records how it was started.
+    src = tmp_path / "zipsrc" / "university-helper-9.9.9"
+    (src / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "docker-compose.release.yml", src / "docker-compose.release.yml")
+    shutil.copytree(REPO_ROOT / "database", src / "database")
+    (src / "scripts" / "deploy_server.ps1").write_text(
+        'param([string]$Tag, [switch]$Yes)\n'
+        'Set-Content -LiteralPath $env:T_CHILD_LOG -Value "child Tag=$Tag Yes=$Yes boot=$env:UH_BOOTSTRAPPED"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    archive = shutil.make_archive(str(tmp_path / "source"), "zip", root_dir=src.parent)
+    return Path(archive)
+
+
+@needs_pwsh
+@pytest.mark.parametrize(("installed", "refreshed"), [("v9.9.0", True), ("v9.9.9", False)])
+def test_powershell_update_refreshes_downloaded_source_for_a_new_tag(tmp_path, installed, refreshed):
+    root, env, log = _fixture(tmp_path)
+    (root / ".uh-source-tag").write_text(f"{installed}\n", encoding="ascii")
+    (root / ".env").write_text("POSTGRES_PASSWORD=keepme\n", encoding="utf-8")
+    weblog, child_log = tmp_path / "web.log", tmp_path / "child.log"
+    env.update(
+        T_TAG="9.9.9", T_ZIP=str(_release_zip(tmp_path)), T_WEBLOG=str(weblog), T_CHILD_LOG=str(child_log)
+    )
+
+    result = _run(root, env)
+
+    if refreshed:
+        assert result.returncode == 0, result.stdout
+        assert "from v9.9.0 to v9.9.9" in result.stdout
+        assert weblog.read_text().strip().endswith("/archive/refs/tags/v9.9.9.zip")
+        assert (root / ".uh-source-tag").read_text().strip() == "v9.9.9"
+        assert child_log.read_text().strip() == "child Tag=9.9.9 Yes=True boot=1"
+        assert "POSTGRES_PASSWORD=keepme" in (root / ".env").read_text()
+        assert not log.exists()
+    else:
+        assert not weblog.exists()
+        assert not child_log.exists()
+        assert (root / "scripts" / "deploy_server.ps1").read_text() == SCRIPT.read_text()

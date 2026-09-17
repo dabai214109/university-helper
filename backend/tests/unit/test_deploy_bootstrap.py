@@ -164,3 +164,86 @@ def test_script_body_runs_only_after_full_download():
     source = SCRIPT.read_text(encoding="utf-8").rstrip()
     assert source.endswith('main "$@"')
     assert "\nmain() {" in source
+
+
+def _downloaded_install(workdir: Path, tag: str) -> Path:
+    install = workdir / "university-helper"
+    (install / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPT, install / "scripts" / "deploy_server.sh")
+    shutil.copy2(REPO_ROOT / "docker-compose.release.yml", install / "docker-compose.release.yml")
+    shutil.copytree(REPO_ROOT / "database", install / "database")
+    (install / ".uh-source-tag").write_text(f"{tag}\n", encoding="utf-8")
+    (install / ".env").write_text(
+        "POSTGRES_PASSWORD=keepme\nSECRET_KEY=" + "s" * 64 + "\nCREDENTIAL_ENCRYPTION_KEY=" + "A" * 43 + "=\n",
+        encoding="utf-8",
+    )
+    return install
+
+
+def test_update_to_a_new_tag_refreshes_downloaded_source_first(sandbox):
+    workdir, env, log = sandbox
+    install = _downloaded_install(workdir, "v9.9.0")
+
+    result = subprocess.run(
+        ["bash", "scripts/deploy_server.sh", "--tag", "9.9.9", "-y"],
+        cwd=install, env=env, text=True, capture_output=True, timeout=60, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "from v9.9.0 to v9.9.9" in result.stdout
+    assert (install / ".uh-source-tag").read_text().strip() == "v9.9.9"
+    assert "POSTGRES_PASSWORD=keepme" in (install / ".env").read_text()
+    calls = log.read_text()
+    assert calls.count("archive/refs/tags/v9.9.9.tar.gz") == 1
+    assert "pull UH_TAG=9.9.9" in calls
+
+
+def test_rerun_with_the_installed_tag_does_not_download(sandbox):
+    workdir, env, log = sandbox
+    install = _downloaded_install(workdir, "v9.9.9")
+
+    result = subprocess.run(
+        ["bash", "scripts/deploy_server.sh", "--tag", "v9.9.9", "-y"],
+        cwd=install, env=env, text=True, capture_output=True, timeout=60, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "archive/refs/tags" not in log.read_text()
+
+
+def test_new_release_asset_run_next_to_old_install_refreshes_it(sandbox):
+    workdir, env, log = sandbox
+    install = _downloaded_install(workdir, "v9.9.0")
+    stamped = SCRIPT.read_text(encoding="utf-8").replace('UH_BUNDLED_TAG=""', 'UH_BUNDLED_TAG="v9.9.8"', 1)
+
+    result = subprocess.run(
+        ["bash", "-s", "--", "-y"],
+        input=stamped,
+        cwd=workdir, env=env, text=True, capture_output=True, timeout=60, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (install / ".uh-source-tag").read_text().strip() == "v9.9.8"
+    assert "pull UH_TAG=9.9.8" in log.read_text()
+
+
+def test_git_checkout_is_not_overwritten_when_tags_differ(sandbox):
+    workdir, env, log = sandbox
+    checkout = workdir / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / ".git").mkdir()
+    (checkout / "backend").mkdir()
+    (checkout / "backend" / "pyproject.toml").write_text('[project]\nversion = "9.9.0"\n', encoding="utf-8")
+    shutil.copy2(SCRIPT, checkout / "scripts" / "deploy_server.sh")
+    shutil.copy2(REPO_ROOT / "docker-compose.release.yml", checkout / "docker-compose.release.yml")
+    shutil.copytree(REPO_ROOT / "database", checkout / "database")
+
+    result = subprocess.run(
+        ["bash", "scripts/deploy_server.sh", "--tag", "9.9.9", "-y"],
+        cwd=checkout, env=env, text=True, capture_output=True, timeout=60, check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "git checkout v9.9.9" in result.stdout + result.stderr
+    assert "archive/refs/tags" not in log.read_text()
+    assert not (checkout / ".uh-source-tag").exists()
