@@ -99,12 +99,31 @@ jobs:
             echo '```'
             echo ""
             echo "## Server (Docker)"
+            echo "Linux / macOS / WSL2 (downloads this release's source, then installs it):"
             echo '```bash'
-            echo "git clone https://github.com/sweetcornna/university-helper.git"
-            echo "cd university-helper"
-            echo "bash scripts/deploy_server.sh --tag $TAG --domain your.domain"
+            echo "curl -fsSL https://github.com/sweetcornna/university-helper/releases/download/$TAG/deploy_server.sh | bash -s -- --domain your.domain --admin-email you@example.com -y"
             echo '```'
+            echo "Windows (Docker Desktop):"
+            echo '```powershell'
+            echo "Invoke-WebRequest -UseBasicParsing https://github.com/sweetcornna/university-helper/releases/download/$TAG/deploy_server.ps1 -OutFile deploy_server.ps1"
+            echo "powershell -ExecutionPolicy Bypass -File deploy_server.ps1 -Yes"
+            echo '```'
+            echo "Updating an existing install: re-run the same command; .env and data are kept."
           } >> release_notes.md
+
+      # The attached installers must work without a checkout, so each copy is
+      # stamped with this release's tag and downloads the matching source.
+      - name: Prepare standalone installer assets
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          sed "s/^UH_BUNDLED_TAG=\"\"$/UH_BUNDLED_TAG=\"${TAG}\"/" scripts/deploy_server.sh > release-assets/deploy_server.sh
+          sed "s/^\$BundledTag = \"\"$/\$BundledTag = \"${TAG}\"/" scripts/deploy_server.ps1 > release-assets/deploy_server.ps1
+          grep -qx "UH_BUNDLED_TAG=\"${TAG}\"" release-assets/deploy_server.sh
+          grep -qx "\$BundledTag = \"${TAG}\"" release-assets/deploy_server.ps1
+          chmod +x release-assets/deploy_server.sh
 
       - name: Create DRAFT release
         id: release
@@ -116,8 +135,8 @@ jobs:
           draft: true
           files: |
             docker-compose.release.yml
-            scripts/deploy_server.sh
-            scripts/deploy_server.ps1
+            release-assets/deploy_server.sh
+            release-assets/deploy_server.ps1
 
   # ───────────────────────── 2a. server API image ───────────────────────────
   app-image:

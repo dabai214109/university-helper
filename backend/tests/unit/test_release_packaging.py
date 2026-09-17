@@ -513,7 +513,7 @@ def test_release_workflow_dispatch_checkouts_use_requested_release_ref():
 def test_release_workflow_run_blocks_do_not_interpolate_github_expressions():
     blocks = _workflow_run_blocks()
 
-    assert len(blocks) == 17
+    assert len(blocks) == 18
     for job_name, step_name, script in blocks:
         assert "${{" not in script, f"direct GitHub expression in {job_name}/{step_name}"
 
@@ -604,3 +604,16 @@ def test_release_tag_rejects_prerelease_build_combination_consistently(tmp_path)
 
         assert rejected.returncode == 2, rejected.stderr
         assert not output.exists()
+
+
+def test_release_attaches_tag_stamped_standalone_installers():
+    workflow = _workflow_text()
+    create_release = _job_block("create-release")
+
+    assert "name: Prepare standalone installer assets" in create_release
+    assert 'UH_BUNDLED_TAG=\\"${TAG}\\"' in create_release
+    assert "release-assets/deploy_server.sh" in create_release
+    assert "release-assets/deploy_server.ps1" in create_release
+    assert "            scripts/deploy_server.sh\n" not in workflow
+    assert 'UH_BUNDLED_TAG=""' in (REPO_ROOT / "scripts" / "deploy_server.sh").read_text()
+    assert '$BundledTag = ""' in (REPO_ROOT / "scripts" / "deploy_server.ps1").read_text()
