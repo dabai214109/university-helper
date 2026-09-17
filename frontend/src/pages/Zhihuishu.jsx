@@ -1,7 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Clock,
   List,
   Loader2,
   Pause,
@@ -10,10 +9,14 @@ import {
   RefreshCcw,
   X
 } from 'lucide-react'
-import { Input, Toggle, useToast } from '../components'
+import { Input, Toggle, useRuntimeProfile, useToast } from '../components'
 import { api } from '../utils/api'
 import { removeToken } from '../utils/auth'
-import { applyCourseProgressToTaskRecords } from '../utils/zhihuishuTasks'
+import {
+  applyCourseProgressToTaskRecords,
+  applyTaskActionToRecords,
+  TERMINAL_ZHIHUISHU_TASK_STATUSES,
+} from '../utils/zhihuishuTasks'
 
 const QR_POLL_INTERVAL_MS = 2000
 const DEFAULT_PROGRESS_POLL_SECONDS = 5
@@ -28,7 +31,14 @@ const GLASS_CARD_CLASS =
 const PANEL_CLASS =
   'rounded-xl border border-border/30 bg-surface/60 p-4 backdrop-blur-sm transition-all duration-200'
 const TAB_BUTTON_CLASS =
-  'min-h-[44px] min-w-[44px] rounded-xl px-4 py-2 font-medium cursor-pointer transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/30'
+  'min-h-[44px] min-w-[44px] rounded-xl px-4 py-2 font-medium cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/30'
+const ZHIHUISHU_TABS = [
+  { id: 'login', label: '登录' },
+  { id: 'courses', label: '课程' },
+  { id: 'tasks', label: '任务' },
+  { id: 'settings', label: '设置' },
+  { id: 'status', label: '状态与退出' },
+]
 const FIELD_CLASS =
   'w-full min-h-[44px] rounded-xl border border-border/30 bg-surface/70 px-4 py-2 text-text transition-all duration-200 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20'
 const ACTION_BUTTON_CLASS =
@@ -241,6 +251,7 @@ export default function Zhihuishu() {
   const bootstrapStartedRef = useRef(false)
   const activeTaskStorageReadyRef = useRef(false)
 
+  const { isLocal } = useRuntimeProfile()
   const toast = useToast()
 
   const [booting, setBooting] = useState(true)
@@ -493,13 +504,13 @@ export default function Zhihuishu() {
         return merged
       })
       if (!silent && canWrite()) {
-        setNoticeMessage('success', pickMessage(resp) || '已同步后端配置。')
+        setNoticeMessage('success', pickMessage(resp) || '配置已同步。')
       }
       return true
     } catch (err) {
       if (!canWrite()) return false
       if (!silent) {
-        setNoticeMessage('info', '后端配置不可用，已使用本地配置。')
+        setNoticeMessage('info', '配置同步失败，已使用本地配置。')
       }
       return false
     }
@@ -523,10 +534,10 @@ export default function Zhihuishu() {
           auto_answer: merged.autoAnswer
         })
       })
-      setNoticeMessage('success', pickMessage(resp) || '配置已保存到后端和本地。')
+      setNoticeMessage('success', pickMessage(resp) || '配置已保存。')
     } catch (err) {
       if (savedToStorage) {
-        setNoticeMessage('info', '后端配置保存失败，已保存到本地。')
+        setNoticeMessage('info', '配置同步失败，已保存到本地。')
       } else {
         setNoticeMessage('error', err.message || '配置保存失败。')
       }
@@ -590,7 +601,7 @@ export default function Zhihuishu() {
       setCourseDetail((current) => (isCurrent() ? fallback : current))
       setCourseStructure((current) => (isCurrent() ? [] : current))
       if (!silent && isCurrent()) {
-        setNoticeMessage('info', '课程详情接口不可用，已使用课程列表数据。')
+        setNoticeMessage('info', '课程详情加载失败，已使用课程列表数据。')
       }
       return fallback
     } finally {
@@ -790,11 +801,10 @@ export default function Zhihuishu() {
       // task that finishes or fails in the background gives the user no signal.
       // Require a real prior record (previous.taskId) so restoring an already-
       // finished task on page load doesn't fire a stale "completed" toast.
-      const TERMINAL = ['completed', 'failed', 'cancelled', 'error']
       if (
         previous.taskId &&
-        TERMINAL.includes(normalized.status) &&
-        !TERMINAL.includes(previous.status)
+        TERMINAL_ZHIHUISHU_TASK_STATUSES.has(normalized.status) &&
+        !TERMINAL_ZHIHUISHU_TASK_STATUSES.has(previous.status)
       ) {
         const courseLabel = normalized.courseName || '智慧树任务'
         if (normalized.status === 'completed') {
@@ -814,10 +824,6 @@ export default function Zhihuishu() {
       }
 
       upsertTaskRecord(normalized, isLatestTaskRequest)
-      if (canWriteTaskView()) {
-        activeTaskIdRef.current = normalized.taskId
-        setActiveTaskId(normalized.taskId)
-      }
       if (normalized.courseId === selectedCourseIdRef.current && canWriteTaskView()) {
         setProgress((current) => (canWriteTaskView() ? {
           status: normalized.status,
@@ -845,6 +851,13 @@ export default function Zhihuishu() {
       if (!silent && canWriteTaskView()) {
         setNoticeMessage('success', pickMessage(resp) || '任务详情已刷新。')
       }
+      if (canWriteTaskView()) {
+        activeTaskIdRef.current = normalized.taskId
+        setActiveTaskId(normalized.taskId)
+        if (TERMINAL_ZHIHUISHU_TASK_STATUSES.has(normalized.status)) {
+          stopProgressPolling()
+        }
+      }
       return normalized
     } catch (err) {
       if (!isLatestTaskRequest()) return null
@@ -866,7 +879,7 @@ export default function Zhihuishu() {
         }
       }
     }
-  }, [beginTaskViewIntent, loadCourseProgress, requestZhihuishuApi, setNoticeMessage, upsertTaskRecord])
+  }, [beginTaskViewIntent, loadCourseProgress, requestZhihuishuApi, setNoticeMessage, stopProgressPolling, upsertTaskRecord])
 
   const fetchTaskList = useCallback(async ({ silent = false, taskType, courseId, preferredTaskId, canWrite = () => true } = {}) => {
     if (!canWrite()) return []
@@ -882,7 +895,9 @@ export default function Zhihuishu() {
         .map((task) => {
           const item = normalizeTaskRecord(task)
           if (!item) return null
-          const linkedCourse = courses.find((course) => parseCourseId(course?.courseId || course?.id) === item.courseId)
+          const linkedCourse = coursesRef.current.find(
+            (course) => parseCourseId(course?.courseId || course?.id) === item.courseId,
+          )
           if (!item.courseName && linkedCourse) {
             item.courseName = linkedCourse.courseName || linkedCourse.name || linkedCourse.title || item.courseId
           }
@@ -909,7 +924,7 @@ export default function Zhihuishu() {
       }
       return []
     }
-  }, [courses, mergeTaskRecords, requestZhihuishuApi, selectActiveTask, setNoticeMessage])
+  }, [mergeTaskRecords, requestZhihuishuApi, selectActiveTask, setNoticeMessage])
 
   const refreshTaskList = useCallback(async () => {
     const loadedTasks = await fetchTaskList({ silent: true })
@@ -951,7 +966,10 @@ export default function Zhihuishu() {
         })
       }
 
-      const taskId = parseCourseId(resp?.task_id || resp?.data?.task_id || `${Date.now()}`)
+      const taskId = parseCourseId(resp?.task_id || resp?.data?.task_id)
+      if (!taskId) {
+        throw new Error('服务端未返回有效任务编号，任务未启动。')
+      }
       const selectedCourse = courses.find((course) => parseCourseId(course.courseId || course.id) === selectedCourseId)
       const courseName = selectedCourse?.courseName || selectedCourse?.name || selectedCourse?.title || selectedCourseId
 
@@ -981,10 +999,11 @@ export default function Zhihuishu() {
 
   const cancelTaskById = useCallback(async (taskId) => {
     if (!taskId || taskActionLoading || taskItemActionLoading) return
+    if (!window.confirm('确定要取消该任务吗？此操作不可撤销。')) return
     setTaskItemActionLoading(taskId)
     try {
       const resp = await requestZhihuishuApi(`/tasks/${taskId}/cancel`, { method: 'POST' })
-      const current = taskRecords.find((task) => task.taskId === taskId) || {}
+      const current = taskRecordsRef.current.find((task) => task.taskId === taskId) || {}
       upsertTaskRecord({
         ...current,
         taskId,
@@ -1001,7 +1020,7 @@ export default function Zhihuishu() {
     } finally {
       setTaskItemActionLoading('')
     }
-  }, [activeTaskId, requestZhihuishuApi, setNoticeMessage, taskActionLoading, taskItemActionLoading, taskRecords, upsertTaskRecord])
+  }, [activeTaskId, requestZhihuishuApi, setNoticeMessage, taskActionLoading, taskItemActionLoading, upsertTaskRecord])
 
   const pauseTask = async () => {
     if (taskActionLoading) return
@@ -1009,12 +1028,11 @@ export default function Zhihuishu() {
 
     try {
       const resp = await api(`${ZHIHUISHU_API_BASE}/pause`, { method: 'POST' })
-      setTaskRecords((prev) => prev.map((task) => ({
-        ...task,
-        status: task.status === 'cancelled' ? task.status : 'paused',
+      setTaskRecords((prev) => applyTaskActionToRecords(prev, {
+        action: 'pause',
         message: pickMessage(resp) || '任务已暂停。',
         updatedAt: new Date().toISOString()
-      })))
+      }))
       stopProgressPolling()
       setNoticeMessage('success', pickMessage(resp) || '任务已暂停。')
     } catch (err) {
@@ -1030,12 +1048,11 @@ export default function Zhihuishu() {
 
     try {
       const resp = await api(`${ZHIHUISHU_API_BASE}/resume`, { method: 'POST' })
-      setTaskRecords((prev) => prev.map((task) => ({
-        ...task,
-        status: task.status === 'cancelled' ? task.status : 'running',
+      setTaskRecords((prev) => applyTaskActionToRecords(prev, {
+        action: 'resume',
         message: pickMessage(resp) || '任务已恢复。',
         updatedAt: new Date().toISOString()
-      })))
+      }))
       setNoticeMessage('success', pickMessage(resp) || '任务已恢复。')
       await refreshTaskList()
     } catch (err) {
@@ -1052,12 +1069,11 @@ export default function Zhihuishu() {
 
     try {
       const resp = await api(`${ZHIHUISHU_API_BASE}/cancel`, { method: 'POST' })
-      setTaskRecords((prev) => prev.map((task) => ({
-        ...task,
-        status: 'cancelled',
+      setTaskRecords((prev) => applyTaskActionToRecords(prev, {
+        action: 'cancel',
         message: pickMessage(resp) || '任务已取消。',
         updatedAt: new Date().toISOString()
-      })))
+      }))
       selectActiveTask('')
       setProgress(null)
       stopProgressPolling()
@@ -1298,11 +1314,14 @@ export default function Zhihuishu() {
       try {
         const statusPayload = await loadZhihuishuStatus(true)
         if (statusPayload?.logged_in) {
-          await loadConfigFromBackend(true)
-          const [, loadedTasks] = await Promise.all([
+          await Promise.all([
+            loadConfigFromBackend(true),
             loadCourses(true),
-            fetchTaskList({ silent: true, preferredTaskId: storedActiveTaskId })
           ])
+          const loadedTasks = await fetchTaskList({
+            silent: true,
+            preferredTaskId: storedActiveTaskId,
+          })
 
           const normalizedStoredTaskId = parseCourseId(storedActiveTaskId)
           if (normalizedStoredTaskId) {
@@ -1313,6 +1332,7 @@ export default function Zhihuishu() {
               beginTaskViewIntent(normalizedStoredTaskId)
               const restoredTask = await fetchTaskDetail(normalizedStoredTaskId, true)
               if (!restoredTask?.taskId) {
+                saveActiveTaskIdToStorage('')
                 selectActiveTask(loadedTasks[0]?.taskId || '')
               }
             }
@@ -1337,8 +1357,8 @@ export default function Zhihuishu() {
     loadConfigFromBackend,
     loadCourses,
     loadZhihuishuStatus,
-    navigate,
     readActiveTaskIdFromStorage,
+    saveActiveTaskIdToStorage,
     selectActiveTask,
     stopProgressPolling,
     stopQrPolling
@@ -1445,6 +1465,26 @@ export default function Zhihuishu() {
     }
   }, [progress])
 
+  const handleTabKeyDown = useCallback((event) => {
+    const focusedTab = event.target.closest?.('[role="tab"]')
+    const currentIndex = ZHIHUISHU_TABS.findIndex(
+      (tab) => focusedTab?.id === `zhs-tab-${tab.id}`
+    )
+    if (currentIndex < 0) return
+
+    let nextIndex = currentIndex
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % ZHIHUISHU_TABS.length
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + ZHIHUISHU_TABS.length) % ZHIHUISHU_TABS.length
+    else if (event.key === 'Home') nextIndex = 0
+    else if (event.key === 'End') nextIndex = ZHIHUISHU_TABS.length - 1
+    else return
+
+    event.preventDefault()
+    const nextTab = ZHIHUISHU_TABS[nextIndex].id
+    setActiveTab(nextTab)
+    requestAnimationFrame(() => document.getElementById(`zhs-tab-${nextTab}`)?.focus())
+  }, [])
+
   const activeTaskSummary = useMemo(() => {
     const activeTask = taskRecords.find((task) => task.taskId === activeTaskId) || null
     const payload = parseObject(activeTask?.progress, '')
@@ -1474,29 +1514,37 @@ export default function Zhihuishu() {
 
   return (
     <div className="overflow-x-hidden">
-      <main className="space-y-6">
+      <div className="space-y-6">
         <section className={GLASS_CARD_CLASS}>
-          <div>
-            <h1 className="text-2xl font-bold text-text">智慧树学习助手</h1>
-            <p className="text-sm text-text/70">登录、选课、任务控制、设置与状态管理一体化。</p>
-          </div>
+          <h1 className="text-2xl font-bold text-text">智慧树学习助手</h1>
 
-          <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-5">
-            {['login', 'courses', 'tasks', 'settings', 'status'].map((tab) => (
+          <div
+            role="tablist"
+            aria-label="智慧树工作区"
+            tabIndex="-1"
+            className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-5"
+            onKeyDown={handleTabKeyDown}
+          >
+            {ZHIHUISHU_TABS.map((tab) => (
               <button
-                key={tab}
+                key={tab.id}
+                id={`zhs-tab-${tab.id}`}
                 type="button"
-                className={`${TAB_BUTTON_CLASS} ${activeTab === tab ? 'bg-primary text-white' : 'bg-surface/70 text-text hover:bg-surface'}`}
-                onClick={() => setActiveTab(tab)}
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                aria-controls={`zhs-panel-${tab.id}`}
+                tabIndex={activeTab === tab.id ? 0 : -1}
+                className={`${TAB_BUTTON_CLASS} ${activeTab === tab.id ? 'bg-primary text-white' : 'bg-surface text-text hover:bg-surface-hover'}`}
+                onClick={() => setActiveTab(tab.id)}
               >
-                {tab === 'login' ? '登录' : tab === 'courses' ? '课程' : tab === 'tasks' ? '任务' : tab === 'settings' ? '设置' : '状态/退出'}
+                {tab.label}
               </button>
             ))}
           </div>
         </section>
 
         {activeTab === 'login' && (
-          <section className="mx-auto max-w-xl space-y-4">
+          <section id="zhs-panel-login" role="tabpanel" aria-labelledby="zhs-tab-login" tabIndex="0" className="mx-auto max-w-xl space-y-4">
             {/* Login-method switcher — only the chosen method's form shows, so
                 the two forms no longer compete on screen. */}
             <div
@@ -1574,7 +1622,7 @@ export default function Zhihuishu() {
           </section>
         )}
         {activeTab === 'courses' && (
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <section id="zhs-panel-courses" role="tabpanel" aria-labelledby="zhs-tab-courses" tabIndex="0" className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className={`${GLASS_CARD_CLASS} space-y-4`}>
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-bold text-text">课程与启动</h2>
@@ -1625,7 +1673,6 @@ export default function Zhihuishu() {
                 </div>
 
                 <div>
-                  <label className="mb-2 block text-sm font-medium text-text">自动答题</label>
                   <Toggle
                     label="自动答题"
                     checked={settings.autoAnswer}
@@ -1772,7 +1819,7 @@ export default function Zhihuishu() {
         )}
 
         {activeTab === 'tasks' && (
-          <section className="space-y-6">
+          <section id="zhs-panel-tasks" role="tabpanel" aria-labelledby="zhs-tab-tasks" tabIndex="0" className="space-y-6">
             <div className={GLASS_CARD_CLASS}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h2 className="text-lg font-bold text-text">任务控制</h2>
@@ -1840,8 +1887,8 @@ export default function Zhihuishu() {
         )}
 
         {activeTab === 'settings' && (
-          <section className={GLASS_CARD_CLASS}>
-            <h2 className="text-lg font-bold text-text">配置保存</h2>
+          <section id="zhs-panel-settings" role="tabpanel" aria-labelledby="zhs-tab-settings" tabIndex="0" className={GLASS_CARD_CLASS}>
+            <h2 className="text-lg font-bold text-text">学习设置</h2>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
                 <label htmlFor="settings-speed" className="mb-2 block text-sm font-medium text-text">默认学习倍速</label>
@@ -1860,10 +1907,7 @@ export default function Zhihuishu() {
             </div>
 
             <div className="mt-4 flex items-center justify-between rounded-xl border border-border/30 bg-surface/70 px-4 py-3">
-              <div>
-                <p className="font-medium text-text">默认自动答题</p>
-                <p className="mt-1 text-sm text-text/70">启动课程时默认启用自动答题。</p>
-              </div>
+              <p className="font-medium text-text">默认自动答题</p>
               <Toggle
                 label="默认自动答题"
                 checked={settings.autoAnswer}
@@ -1881,7 +1925,7 @@ export default function Zhihuishu() {
                   }}
                   disabled={settingsSaving}
                 >
-                  从后端读取
+                  同步配置
                 </button>
                 <button
                   type="button"
@@ -1899,7 +1943,7 @@ export default function Zhihuishu() {
         )}
 
         {activeTab === 'status' && (
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <section id="zhs-panel-status" role="tabpanel" aria-labelledby="zhs-tab-status" tabIndex="0" className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <div className={`${GLASS_CARD_CLASS} space-y-4`}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-lg font-bold text-text">当前状态</h2>
@@ -1944,23 +1988,20 @@ export default function Zhihuishu() {
 
             <div className={`${GLASS_CARD_CLASS} space-y-4`}>
               <h2 className="text-lg font-bold text-text">退出与清理</h2>
-              <button type="button" className={`${ACTION_BUTTON_CLASS} w-full bg-primary/90 hover:bg-primary`} onClick={logoutZhihuishu}>退出智慧树会话（后端）</button>
+              <button type="button" className={`${ACTION_BUTTON_CLASS} w-full bg-primary/90 hover:bg-primary`} onClick={logoutZhihuishu}>退出智慧树会话</button>
               <button type="button" className={`${ACTION_BUTTON_CLASS} w-full bg-secondary/90 hover:bg-secondary`} onClick={resetZhihuishuSession}>清理智慧树会话状态</button>
-              <button type="button" className={`${ACTION_BUTTON_CLASS} w-full bg-danger hover:bg-danger/90`} onClick={() => { void logoutSystem() }}>系统退出登录</button>
+              {!isLocal && (
+                <button type="button" className={`${ACTION_BUTTON_CLASS} w-full bg-danger hover:bg-danger/90`} onClick={() => { void logoutSystem() }}>系统退出登录</button>
+              )}
               <div className="rounded-xl border border-border/30 bg-surface/70 p-4 text-sm text-text/70">
-                <p>说明：</p>
-                <p className="mt-2">1. 清理会话仅重置当前页面状态，不会删除已保存设置。</p>
-                <p className="mt-1">2. 退出智慧树会调用 `/course/zhihuishu/logout` 并取消相关任务。</p>
-                <p className="mt-1">3. 系统退出会清除 Token 并返回登录页。</p>
+                <p>清理会话仅重置当前页面状态，不会删除已保存设置。</p>
+                <p className="mt-1">退出智慧树会结束该平台会话并取消相关任务。</p>
+                {!isLocal && <p className="mt-1">系统退出会清除登录状态并返回登录页。</p>}
               </div>
             </div>
           </section>
         )}
-
-        <footer className="pb-2 text-xs text-text/60">
-          <p className="flex items-center gap-2"><Clock className="h-3.5 w-3.5" />交互按钮均为 44px+ 点击目标，支持键盘聚焦与 200ms 过渡动画。</p>
-        </footer>
-      </main>
+      </div>
     </div>
   )
 }

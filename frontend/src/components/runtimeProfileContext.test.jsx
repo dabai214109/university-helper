@@ -94,3 +94,31 @@ describe('RuntimeProfileProvider', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 })
+
+describe('RuntimeProfileProvider.markLocal', () => {
+  test('switches a failed-closed server profile to local', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+
+    function MarkProbe() {
+      const { profile, isLocal, loading, markLocal } = useRuntimeProfile()
+      return (
+        <>
+          <p>{loading ? 'loading' : `${profile}:${isLocal}`}</p>
+          <button type="button" onClick={markLocal}>mark</button>
+        </>
+      )
+    }
+
+    render(
+      <RuntimeProfileProvider>
+        <MarkProbe />
+      </RuntimeProfileProvider>,
+    )
+
+    expect(await screen.findByText('server:false')).toBeTruthy()
+    act(() => {
+      screen.getByRole('button', { name: 'mark' }).click()
+    })
+    expect(await screen.findByText('local:true')).toBeTruthy()
+  })
+})

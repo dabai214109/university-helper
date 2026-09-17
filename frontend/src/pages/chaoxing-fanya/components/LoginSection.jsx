@@ -19,7 +19,6 @@ export default function LoginSection({
           label="超星账号"
           name="cx-username"
           autoComplete="username"
-          placeholder="请输入超星账号"
           disabled={loginLoading}
           value={username}
           onChange={(event) => setUsername(event.target.value)}
@@ -32,7 +31,6 @@ export default function LoginSection({
           type="password"
           name="cx-password"
           autoComplete="current-password"
-          placeholder="请输入密码"
           disabled={loginLoading}
           value={password}
           onChange={(event) => setPassword(event.target.value)}

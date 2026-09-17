@@ -180,7 +180,7 @@ export default function ChaoxingFanya() {
 
 
       if (!resp) return
-      if (!resp.task_id) throw new Error('后端未返回任务 ID。')
+      if (!resp.task_id) throw new Error('未返回任务 ID，任务未启动。')
 
 
       taskExec.setTaskId(resp.task_id)
@@ -220,7 +220,6 @@ export default function ChaoxingFanya() {
       <div className="space-y-6">
         <section className={CARD}>
           <h1 className="text-3xl font-bold text-text">超星学习通自动刷课</h1>
-          <p className="mt-2 text-sm text-text/70">支持离开页面后恢复任务状态、日志与历史任务查看。</p>
         </section>
 
 

@@ -23,6 +23,7 @@ def _bash_deploy_fixture(tmp_path: Path, script_source: str) -> tuple[Path, dict
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "deploy_server.sh").write_text(script_source, encoding="utf-8")
     shutil.copy2(REPO_ROOT / "docker-compose.release.yml", root / "docker-compose.release.yml")
+    shutil.copytree(REPO_ROOT / "database", root / "database")
 
     bin_dir = root / "bin"
     bin_dir.mkdir()
@@ -88,6 +89,7 @@ def test_deploy_script_accepts_v_prefixed_release_tags(tmp_path):
     (tmp_path / "scripts").mkdir()
     shutil.copy2(REPO_ROOT / "scripts" / "deploy_server.sh", tmp_path / "scripts" / "deploy_server.sh")
     shutil.copy2(REPO_ROOT / "docker-compose.release.yml", tmp_path / "docker-compose.release.yml")
+    shutil.copytree(REPO_ROOT / "database", tmp_path / "database")
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -170,7 +172,7 @@ def test_bash_health_success_is_zero(tmp_path):
 
 def test_bash_health_timeout_is_fatal_and_regresses_old_success(tmp_path):
     source = (REPO_ROOT / "scripts" / "deploy_server.sh").read_text(encoding="utf-8")
-    legacy_source = source.replace("wait_health\nscaffold_tls", "wait_health || true\nscaffold_tls")
+    legacy_source = source.replace("  wait_health\n  scaffold_tls", "  wait_health || true\n  scaffold_tls")
     assert legacy_source != source
 
     legacy = _run_bash_deploy(tmp_path / "legacy", legacy_source, health_status="503")
@@ -199,6 +201,7 @@ def _powershell_deploy_fixture(tmp_path: Path, script_source: str) -> tuple[Path
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "deploy_server.ps1").write_text(script_source, encoding="utf-8")
     shutil.copy2(REPO_ROOT / "docker-compose.release.yml", root / "docker-compose.release.yml")
+    shutil.copytree(REPO_ROOT / "database", root / "database")
 
     bin_dir = root / "bin"
     bin_dir.mkdir()
@@ -315,3 +318,13 @@ def test_powershell_health_success_and_timeout_are_consistent(tmp_path):
     assert "Deploy complete." not in timeout.stdout
     assert legacy.returncode == 0, legacy.stdout
     assert "Deploy complete." in legacy.stdout
+
+
+@pytest.mark.parametrize("compose_file", ["docker-compose.release.yml", "docker-compose.server.yml", "docker-compose.newhost.yml"])
+def test_services_come_back_after_a_reboot(compose_file):
+    """on-failure:N does not restart containers that exited cleanly when dockerd stops."""
+    compose = (REPO_ROOT / compose_file).read_text(encoding="utf-8")
+    policies = re.findall(r"^\s+restart:\s*(\S+)", compose, re.MULTILINE)
+
+    assert policies
+    assert set(policies) == {"unless-stopped"}

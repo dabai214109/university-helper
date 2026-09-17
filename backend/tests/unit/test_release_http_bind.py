@@ -30,6 +30,7 @@ def _bash_deploy_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     scripts.mkdir(parents=True)
     shutil.copy2(BASH_DEPLOY, scripts / BASH_DEPLOY.name)
     shutil.copy2(COMPOSE_FILE, root / COMPOSE_FILE.name)
+    shutil.copytree(REPO_ROOT / "database", root / "database")
 
     bin_dir = root / "bin"
     bin_dir.mkdir()
@@ -187,29 +188,222 @@ def test_bash_deploy_accepts_ascii_and_punycode_fqdns(tmp_path, domain):
     assert f'CORS_ORIGINS=["https://{domain}"]' in (root / ".env").read_text(encoding="utf-8")
 
 
-def test_bash_deploy_keeps_existing_env_untouched(tmp_path):
-    root, env, docker_log = _bash_deploy_fixture(tmp_path)
-    env_path = root / ".env"
-    original = "SECRET_KEY=existing\nHTTP_BIND_HOST=198.51.100.7\n"
-    env_path.write_text(original, encoding="utf-8")
-    env_path.chmod(0o640)
+VALID_FERNET = "A" * 43 + "="
 
-    result = subprocess.run(
-        ["bash", "scripts/deploy_server.sh", "--domain", "example.test", "-y", "--no-tls"],
+
+def _run_bash(root: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "scripts/deploy_server.sh", *args],
         cwd=root,
         env=env,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=60,
         check=False,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert env_path.read_text(encoding="utf-8") == original
-    assert stat.S_IMODE(env_path.stat().st_mode) == 0o640
+
+def _env_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            values[key] = value
+    return values
+
+
+def _up_line(docker_log: Path) -> str:
     up_lines = [line for line in docker_log.read_text().splitlines() if " up -d " in f" {line} "]
     assert len(up_lines) == 1
-    assert "HTTP_BIND_HOST=127.0.0.1" in up_lines[0]
+    return up_lines[0]
+
+
+def test_bash_redeploy_keeps_secrets_and_applies_explicit_flags(tmp_path):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    env_path = root / ".env"
+    secret = "s" * 64
+    env_path.write_text(
+        f"POSTGRES_PASSWORD=dbpass\nSECRET_KEY={secret}\nCREDENTIAL_ENCRYPTION_KEY={VALID_FERNET}\n"
+        'CORS_ORIGINS=["http://203.0.113.10:8080"]\nENV=dev\nHTTP_BIND_HOST=0.0.0.0\nHTTP_PORT=8080\n',
+        encoding="utf-8",
+    )
+    env_path.chmod(0o640)
+
+    result = _run_bash(root, env, "--domain", "example.test", "--admin-email", "Ops@Example.test", "-y", "--no-tls")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = _env_values(env_path)
+    assert values["POSTGRES_PASSWORD"] == "dbpass"
+    assert values["SECRET_KEY"] == secret
+    assert values["CREDENTIAL_ENCRYPTION_KEY"] == VALID_FERNET
+    assert values["CORS_ORIGINS"] == '["https://example.test"]'
+    assert values["ENV"] == "production"
+    assert values["HTTP_BIND_HOST"] == "127.0.0.1"
+    assert values["ADMIN_EMAILS"] == "Ops@Example.test"
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o640
+    assert "HTTP_BIND_HOST=127.0.0.1" in _up_line(docker_log)
+
+
+def test_bash_redeploy_without_flags_keeps_network_settings(tmp_path):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    env_path = root / ".env"
+    env_path.write_text(
+        f"POSTGRES_PASSWORD=dbpass\nSECRET_KEY={'s' * 64}\nCREDENTIAL_ENCRYPTION_KEY={VALID_FERNET}\n"
+        'CORS_ORIGINS=["http://203.0.113.10:9090"]\nENV=dev\nHTTP_BIND_HOST=0.0.0.0\nHTTP_PORT=9090\n',
+        encoding="utf-8",
+    )
+
+    result = _run_bash(root, env, "--tag", "1.4.7", "-y")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = _env_values(env_path)
+    assert values["HTTP_BIND_HOST"] == "0.0.0.0"
+    assert values["HTTP_PORT"] == "9090"
+    assert values["CORS_ORIGINS"] == '["http://203.0.113.10:9090"]'
+    up_line = _up_line(docker_log)
+    assert "HTTP_BIND_HOST=0.0.0.0" in up_line
+
+
+def test_bash_fills_example_env_placeholders(tmp_path):
+    root, env, _ = _bash_deploy_fixture(tmp_path)
+    env_path = root / ".env"
+    shutil.copy2(REPO_ROOT / ".env.example", env_path)
+
+    result = _run_bash(root, env, "-y", "--no-tls")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = _env_values(env_path)
+    assert re.fullmatch(r"[A-Za-z0-9_-]{43}=", values["CREDENTIAL_ENCRYPTION_KEY"])
+    assert not values["SECRET_KEY"].startswith("change-this")
+    assert len(values["SECRET_KEY"]) >= 32
+    assert not values["POSTGRES_PASSWORD"].startswith("change-this")
+
+
+def test_bash_rejects_malformed_credential_key(tmp_path):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    (root / ".env").write_text(
+        f"POSTGRES_PASSWORD=dbpass\nSECRET_KEY={'s' * 64}\nCREDENTIAL_ENCRYPTION_KEY=not-a-key\n", encoding="utf-8"
+    )
+
+    result = _run_bash(root, env, "-y")
+
+    assert result.returncode != 0
+    assert "not a valid Fernet key" in result.stderr
+    assert " up -d" not in (docker_log.read_text() if docker_log.exists() else "")
+
+
+def _mark_volume_present(root: Path) -> None:
+    docker = root / "bin" / "docker"
+    source = docker.read_text(encoding="utf-8")
+    docker.write_text(
+        source.replace(
+            'if [[ "$1" == "info" ]]; then',
+            'if [[ "$1" == "volume" && "$2" == "inspect" ]]; then\n  exit 0\nfi\nif [[ "$1" == "info" ]]; then',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_bash_refuses_new_secrets_when_database_volume_exists(tmp_path):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    _mark_volume_present(root)
+
+    result = _run_bash(root, env, "-y")
+
+    assert result.returncode != 0
+    assert "no .env" in result.stderr
+    assert not (root / ".env").exists()
+    assert " up -d" not in docker_log.read_text()
+
+
+def test_bash_keeps_example_db_password_when_volume_exists(tmp_path):
+    root, env, _ = _bash_deploy_fixture(tmp_path)
+    _mark_volume_present(root)
+    shutil.copy2(REPO_ROOT / ".env.example", root / ".env")
+
+    result = _run_bash(root, env, "-y")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _env_values(root / ".env")["POSTGRES_PASSWORD"] == "change-this-db-password"
+
+
+@pytest.mark.parametrize("option", ["--host", "--port", "--tag", "--admin-email", "--allowed-hosts"])
+def test_bash_option_without_value_fails_before_side_effects(tmp_path, option):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+
+    result = _run_bash(root, env, option)
+
+    assert result.returncode != 0
+    assert f"Missing value for {option}" in result.stderr
+    assert not docker_log.exists()
+    assert not (root / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--port", "70000"), "Invalid --port"),
+        (("--admin-email", "not-an-email"), "Invalid --admin-email"),
+        (("--admin-email", "a@b.c\nENV=dev"), "Invalid --admin-email"),
+        (("--allowed-hosts", "evil;rm"), "Invalid --allowed-hosts"),
+    ],
+)
+def test_bash_rejects_unsafe_values_before_side_effects(tmp_path, args, message):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+
+    result = _run_bash(root, env, *args, "-y")
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not docker_log.exists()
+    assert not (root / ".env").exists()
+
+
+def test_bash_writes_admin_and_allowed_hosts_on_first_run(tmp_path):
+    root, env, _ = _bash_deploy_fixture(tmp_path)
+
+    result = _run_bash(root, env, "--admin-email", "a@example.com,b@example.com", "--allowed-hosts", "192.168.1.5, uh.lan", "-y")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = _env_values(root / ".env")
+    assert values["ADMIN_EMAILS"] == "a@example.com,b@example.com"
+    assert values["ALLOWED_HOSTS"] == "192.168.1.5,uh.lan"
+
+
+def test_bash_production_env_with_plain_http_origin_is_rejected(tmp_path):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    (root / ".env").write_text(
+        f"POSTGRES_PASSWORD=dbpass\nSECRET_KEY={'s' * 64}\nCREDENTIAL_ENCRYPTION_KEY={VALID_FERNET}\n"
+        'CORS_ORIGINS=["http://203.0.113.10:8080"]\nENV=production\n',
+        encoding="utf-8",
+    )
+
+    result = _run_bash(root, env, "-y")
+
+    assert result.returncode != 0
+    assert "ENV=production requires https://" in result.stderr
+    assert " up -d" not in docker_log.read_text()
+
+
+def test_bash_failed_start_prints_logs_and_keeps_env(tmp_path):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    docker = root / "bin" / "docker"
+    docker.write_text(
+        docker.read_text(encoding="utf-8").replace(
+            'if [[ "$1" == "compose" ]]; then\n  exit 0',
+            'if [[ "$1" == "compose" && " $* " == *" up "* ]]; then\n  exit 1\nfi\nif [[ "$1" == "compose" ]]; then\n  exit 0',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_bash(root, env, "-y")
+
+    assert result.returncode != 0
+    assert "The stack did not start" in result.stderr
+    assert " logs --tail=80 app postgres" in docker_log.read_text()
+    assert (root / ".env").exists()
 
 
 def test_bash_and_powershell_bind_modes_match_and_tls_proxy_stays_loopback():
@@ -265,6 +459,7 @@ def _powershell_domain_fixture(
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "deploy_server.ps1").write_text(script_source, encoding="utf-8")
     shutil.copy2(COMPOSE_FILE, root / COMPOSE_FILE.name)
+    shutil.copytree(REPO_ROOT / "database", root / "database")
 
     bin_dir = root / "bin"
     bin_dir.mkdir()
@@ -435,3 +630,54 @@ def test_powershell_deploy_rejects_invalid_domain_before_side_effects(tmp_path, 
     assert result.stdout.strip() == "[x] Invalid --domain: expected an ASCII FQDN (for example example.com)."
     assert not docker_log.exists()
     assert not (wrapper.parent / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "app_arg", "web_arg"),
+    [
+        ({}, None, "--build-arg NPM_REGISTRY=https://registry.npmmirror.com "),
+        (
+            {"BUILD_PIP_INDEX_URL": "https://pypi.org/simple", "BUILD_NPM_REGISTRY": ""},
+            "--build-arg PIP_INDEX_URL=https://pypi.org/simple ",
+            "--build-arg NPM_REGISTRY= ",
+        ),
+    ],
+)
+def test_bash_build_mode_honours_package_mirror_overrides(tmp_path, extra_env, app_arg, web_arg):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    _write_executable(
+        root / "bin" / "docker",
+        f"""
+        #!/usr/bin/env bash
+        printf '%s\\n' "$*" >> "{docker_log}"
+        if [[ "$1" == "--version" ]]; then
+          echo "Docker version 29.4.1, build test"
+        elif [[ "$1" == "compose" && "$2" == "version" ]]; then
+          echo "Docker Compose version v2.32.0"
+        elif [[ "$1" == "volume" ]]; then
+          exit 1
+        fi
+        exit 0
+        """,
+    )
+    env.update(extra_env)
+
+    result = subprocess.run(
+        ["bash", "scripts/deploy_server.sh", "--build", "-y", "--no-tls"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = docker_log.read_text().splitlines()
+    app_build = next(line for line in lines if line.startswith("build -f Dockerfile.server"))
+    web_build = next(line for line in lines if line.startswith("build -f Dockerfile.web"))
+    if app_arg is None:
+        assert "--build-arg" not in app_build
+    else:
+        assert app_arg in app_build
+    assert web_arg in web_build

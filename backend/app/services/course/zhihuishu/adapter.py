@@ -50,8 +50,12 @@ class ZhihuishuAdapter:
         self._task_state: dict[str, Any] | None = None
         self._tasks: dict[str, dict[str, Any]] = {}
 
-    def login_with_qr(self, qr_callback: Callable[[bytes], None]) -> dict:
-        cookies = self.auth.qr_login(qr_callback)
+    def login_with_qr(
+        self,
+        qr_callback: Callable[[bytes], None],
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
+        cookies = self.auth.qr_login(qr_callback, cancel_event=cancel_event)
         self._init_services(cookies)
         return {"success": True, "cookies": cookies}
 
@@ -550,6 +554,7 @@ class ZhihuishuAdapter:
         current_index = 0
 
         while True:
+            should_wait_for_resume = False
             # --- Phase 1: under lock, decide what to do next & pick the video ---
             with self._task_lock:
                 if not self._task_state or self._task_state.get("task_id") != task_id:
@@ -574,19 +579,22 @@ class ZhihuishuAdapter:
                 if task.get("paused"):
                     task["status"] = "paused"
                     task["updated_at"] = time.time()
-                    time.sleep(0.3)
-                    continue
+                    should_wait_for_resume = True
+                else:
+                    current_video = videos[current_index]
+                    current_video["status"] = "learning"
+                    current_video["progress"] = 0
+                    task["current_video"] = current_video.get("title")
+                    task["status"] = "running"
+                    task["message"] = "Task is running"
+                    auto_answer = bool(task.get("auto_answer", True))
+                    video_id = current_video.get("id")
+                    questions = list(current_video.get("questions") or [])
+                    speed = float(task.get("speed") or 1.0)
 
-                current_video = videos[current_index]
-                current_video["status"] = "learning"
-                current_video["progress"] = 0
-                task["current_video"] = current_video.get("title")
-                task["status"] = "running"
-                task["message"] = "Task is running"
-                auto_answer = bool(task.get("auto_answer", True))
-                video_id = current_video.get("id")
-                questions = list(current_video.get("questions") or [])
-                speed = float(task.get("speed") or 1.0)
+            if should_wait_for_resume:
+                time.sleep(0.3)
+                continue
 
             # --- Phase 2: blocking platform call OUTSIDE the lock ---
             watch_ok = False

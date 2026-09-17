@@ -37,8 +37,24 @@ entrypoint 会按文件名顺序执行以下文件（已有数据卷不会重复
    `/docker-entrypoint-initdb.d/templates/tenant_template.sql` 应用
    `database/templates/tenant_template.sql`。
 
+脚本最后执行 `ALTER DATABASE tenant_template WITH IS_TEMPLATE true`，
+这样 PostgreSQL 会拒绝 `DROP DATABASE tenant_template`。这里没有关闭
+`ALLOW_CONNECTIONS`，因为 `pg_dumpall` 会跳过不允许连接的库，备份里就
+少了模板库。
+
 `02-bootstrap-tenant-template.sh` 是 Docker entrypoint 的辅助脚本，不能
-直接按容器内的绝对路径在宿主机执行。
+直接按容器内的绝对路径在宿主机执行。仓库的 `.gitattributes` 强制它保持
+LF 换行；如果在 Windows 上用别的方式拷贝导致变成 CRLF，初始化会中途
+失败，数据库里就不会有 `tenant_template`。
+
+### 应用启动时的自检与修复
+
+服务器版 app 启动后会在后台检查 `users` 表和 `tenant_template` 库，缺哪个就用
+镜像里自带的 `00-schema.sql` 和 `tenant_template.sql` 补上（`backend/app/db/bootstrap.py`）。
+所以数据卷没有跑过初始化脚本时，通常重启一次 app 就能恢复注册。检查结果写在
+`/health` 的 `schema` 字段：`ok`、`missing_users`、`missing_tenant_template` 或
+`unknown`。数据库账号没有 CREATEDB 权限时修复会失败，日志里会说明原因。
+设置 `DB_AUTO_BOOTSTRAP=false` 可以关闭这个行为。
 
 ### 宿主机手工初始化
 
@@ -53,6 +69,8 @@ psql -v ON_ERROR_STOP=1 -U postgres -d main_db -f database/01-create_tenant.sql
 createdb -U postgres tenant_template     # 若 tenant_template 尚不存在
 psql -v ON_ERROR_STOP=1 -U postgres -d tenant_template \
   -f database/templates/tenant_template.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d main_db \
+  -c "ALTER DATABASE tenant_template WITH IS_TEMPLATE true;"
 ```
 
 这组宿主机命令是 `02-bootstrap-tenant-template.sh` 的等价操作；不要在

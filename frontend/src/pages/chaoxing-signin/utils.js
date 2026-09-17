@@ -6,6 +6,20 @@ export const POLL_INTERVAL_MS = 3000
 
 export const CHAOXING_API_BASE = '/api/v1/chaoxing'
 
+export const MAX_PHOTO_BYTES = 5 * 1024 * 1024
+
+export const ALLOWED_PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
+
+export const validatePhotoFile = (file) => {
+  if (!file) return
+  if (!ALLOWED_PHOTO_TYPES.has(file.type)) {
+    throw new Error('照片仅支持 JPG、PNG 或 WebP 格式。')
+  }
+  if (file.size > MAX_PHOTO_BYTES) {
+    throw new Error('照片不能超过 5 MB，请压缩后重试。')
+  }
+}
+
 export const CHAOXING_SETTINGS_KEY = 'chaoxing_signin_settings_v1'
 
 export const DEFAULT_CHECK_INTERVAL_MINUTES = 5
@@ -302,6 +316,7 @@ export const shouldUseLocationParams = (value) => {
 
 
 export const fileToBase64 = (file) => {
+  validatePhotoFile(file)
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => {

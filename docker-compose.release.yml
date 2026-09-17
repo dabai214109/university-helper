@@ -12,7 +12,7 @@ services:
   app:
     image: ghcr.io/sweetcornna/university-helper-app:${UH_TAG:-latest}
     container_name: shuake-easy-learning-app
-    restart: on-failure:5
+    restart: unless-stopped
     # Local-only publish for health checks / debugging; external traffic goes
     # through the web container. Override APP_PORT in .env if 8000 is taken.
     ports:
@@ -27,6 +27,9 @@ services:
       SHUAKE_COMPAT_SECRET: ${SHUAKE_COMPAT_SECRET:-}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
       # nginx (web container / host) terminates TLS; the app must not redirect
       # http->https itself or it would loop / break plain-IP access.
       ENFORCE_HTTPS: "false"
@@ -65,7 +68,7 @@ services:
   web:
     image: ghcr.io/sweetcornna/university-helper-web:${UH_TAG:-latest}
     container_name: shuake-easy-learning-web
-    restart: on-failure:5
+    restart: unless-stopped
     depends_on:
       app:
         condition: service_healthy
@@ -90,7 +93,7 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: shuake-easy-learning-db
-    restart: on-failure:5
+    restart: unless-stopped
     command:
       - "postgres"
       - "-c"

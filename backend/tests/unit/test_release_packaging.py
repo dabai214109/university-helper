@@ -89,6 +89,18 @@ def test_server_runtime_does_not_persist_pip_index_url():
     assert "apt-mirror-selection" in runtime
 
 
+def test_server_image_bundles_schema_files_for_startup_repair():
+    dockerfile = (REPO_ROOT / "Dockerfile.server").read_text()
+    runtime = dockerfile.split("# ---------- runtime ----------", 1)[1]
+
+    assert (
+        "COPY --chown=app:app database/00-schema.sql database/templates/tenant_template.sql /srv/backend/app/db/sql/"
+        in runtime
+    )
+    for path in ("database/00-schema.sql", "database/templates/tenant_template.sql"):
+        assert (REPO_ROOT / path).is_file()
+
+
 def test_release_sidecar_install_uses_the_bounded_pyinstaller_dev_requirement():
     requirement = _pyinstaller_requirement()
     run_script = _desktop_sidecar_install_step()["run"]
@@ -408,6 +420,7 @@ def test_release_publish_job_waits_for_both_release_image_jobs():
         "app-image",
         "web-image",
         "desktop",
+        "updater-manifest",
         "promote-images",
     }
 
@@ -439,7 +452,7 @@ def test_release_promotion_waits_for_every_build_gate_and_uses_only_digests():
     promotion_job = _job_block("promote-images")
     promotion_script = _workflow_run_block("promote-images", "Promote immutable image digests to latest")
 
-    assert _job_needs("promote-images") == {"create-release", "app-image", "web-image", "desktop"}
+    assert _job_needs("promote-images") == {"create-release", "app-image", "web-image", "desktop", "updater-manifest"}
     assert "APP_DIGEST: ${{ needs.app-image.outputs.digest }}" in promotion_job
     assert "WEB_DIGEST: ${{ needs.web-image.outputs.digest }}" in promotion_job
     assert "APP_VERSION: ${{ needs.app-image.outputs.image_version }}" in promotion_job
@@ -501,7 +514,7 @@ def test_release_workflow_dispatch_checkouts_use_requested_release_ref():
 def test_release_workflow_run_blocks_do_not_interpolate_github_expressions():
     blocks = _workflow_run_blocks()
 
-    assert len(blocks) == 17
+    assert len(blocks) == 22
     for job_name, step_name, script in blocks:
         assert "${{" not in script, f"direct GitHub expression in {job_name}/{step_name}"
 
@@ -592,3 +605,16 @@ def test_release_tag_rejects_prerelease_build_combination_consistently(tmp_path)
 
         assert rejected.returncode == 2, rejected.stderr
         assert not output.exists()
+
+
+def test_release_attaches_tag_stamped_standalone_installers():
+    workflow = _workflow_text()
+    create_release = _job_block("create-release")
+
+    assert "name: Prepare standalone installer assets" in create_release
+    assert 'UH_BUNDLED_TAG=\\"${TAG}\\"' in create_release
+    assert "release-assets/deploy_server.sh" in create_release
+    assert "release-assets/deploy_server.ps1" in create_release
+    assert "            scripts/deploy_server.sh\n" not in workflow
+    assert 'UH_BUNDLED_TAG=""' in (REPO_ROOT / "scripts" / "deploy_server.sh").read_text()
+    assert '$BundledTag = ""' in (REPO_ROOT / "scripts" / "deploy_server.ps1").read_text()

@@ -3,11 +3,12 @@ pub use port::parse_listening_port;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU16, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -21,6 +22,15 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const HTTP_IO_TIMEOUT: Duration = Duration::from_millis(750);
 const BACKEND_RETRY_DELAY: Duration = Duration::from_millis(100);
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Let the main window appear before a possible update prompt.
+const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(8);
+/// Bounds the update *check*; downloads are not time-limited by the plugin.
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+/// After a graceful stop request, how long the sidecar gets before it is killed.
+const SIDECAR_STOP_GRACE: Duration = Duration::from_millis(1500);
+const LOG_FILE_NAME: &str = "desktop.log";
+const LOG_MAX_BYTES: u64 = 1024 * 1024;
+const UPDATE_NOTES_MAX_CHARS: usize = 600;
 
 /// Exactly one startup branch may claim completion. The watchdog, sidecar
 /// event reader, and HTTP readiness task intentionally share this arbiter.
@@ -43,21 +53,101 @@ impl StartupCompletion {
     }
 }
 
-/// Kill the sidecar if still running. Idempotent (uses `Option::take`).
-/// Called from `RunEvent::ExitRequested` and before an updater relaunch so the
-/// loopback port is free again (Tauri does NOT auto-reap sidecars).
-fn kill_sidecar(app: &AppHandle) {
-    if let Some(state) = app.try_state::<SidecarProcess>() {
-        match state.0.lock() {
-            Ok(mut guard) => {
-                if let Some(child) = guard.take() {
-                    let _ = child.kill();
-                }
-            }
-            Err(err) => eprintln!("[uh-desktop] sidecar state lock poisoned: {err}"),
+/// Append a line to `<app log dir>/desktop.log` (rotated at 1 MB) and stderr.
+/// Release builds on Windows have no console, so stderr alone is invisible.
+fn log_event(app: &AppHandle, message: impl AsRef<str>) {
+    let message = message.as_ref();
+    eprintln!("[uh-desktop] {message}");
+    let Ok(dir) = app.path().app_log_dir() else {
+        return;
+    };
+    append_log_line(&dir, message);
+}
+
+fn append_log_line(dir: &Path, message: &str) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = dir.join(LOG_FILE_NAME);
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > LOG_MAX_BYTES {
+            let _ = std::fs::rename(&path, dir.join(format!("{LOG_FILE_NAME}.1")));
         }
     }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let _ = writeln!(file, "{seconds} {message}");
 }
+
+/// Stop the sidecar if it is still running. Idempotent (uses `Option::take`).
+/// Called from `RunEvent::ExitRequested`, on startup failures and right before
+/// the updater exits the app (Tauri does NOT auto-reap sidecars).
+///
+/// The sidecar is a PyInstaller onefile binary: the process we spawned is a
+/// bootloader whose child runs the real backend. Killing only the bootloader
+/// leaves that child running, so the whole tree is stopped instead. The backend
+/// also watches `UH_PARENT_PID` and exits by itself if this ever fails.
+fn kill_sidecar(app: &AppHandle) {
+    let Some(state) = app.try_state::<SidecarProcess>() else {
+        return;
+    };
+    let child = match state.0.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(err) => {
+            log_event(app, format!("sidecar state lock poisoned: {err}"));
+            return;
+        }
+    };
+    if let Some(child) = child {
+        stop_process_tree(child.pid());
+        let _ = child.kill();
+    }
+}
+
+#[cfg(unix)]
+fn stop_process_tree(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // The bootloader forwards SIGTERM to its Python child, which lets uvicorn
+    // shut down cleanly (closing local.db) before the hard kill that follows.
+    // SAFETY: plain FFI calls with a pid we spawned; no memory is shared.
+    unsafe {
+        if libc::kill(pid, libc::SIGTERM) != 0 {
+            return;
+        }
+    }
+    let deadline = Instant::now() + SIDECAR_STOP_GRACE;
+    while Instant::now() < deadline {
+        // SAFETY: signal 0 only probes whether the process still exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(windows)]
+fn stop_process_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stop_process_tree(_pid: u32) {}
 
 fn json_string(value: &str) -> String {
     match serde_json::to_string(value) {
@@ -68,7 +158,7 @@ fn json_string(value: &str) -> String {
 
 fn show_startup_error(app: &AppHandle, message: impl AsRef<str>) {
     let message = message.as_ref();
-    eprintln!("[uh-desktop] startup error: {message}");
+    log_event(app, format!("startup error: {message}"));
 
     let Some(splash) = app.get_webview_window("splash") else {
         return;
@@ -104,7 +194,7 @@ fn show_startup_error(app: &AppHandle, message: impl AsRef<str>) {
     );
 
     if let Err(err) = splash.eval(&script) {
-        eprintln!("[uh-desktop] failed to render startup error: {err}");
+        log_event(app, format!("failed to render startup error: {err}"));
     }
 }
 
@@ -368,11 +458,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 1. Spawn the workstream-D sidecar. Name matches `externalBin`/the triple base.
             let app_handle = app.handle().clone();
             let sidecar = match app.shell().sidecar("uh-backend") {
-                Ok(command) => command,
+                // The backend exits on its own when this process disappears.
+                Ok(command) => command.env("UH_PARENT_PID", std::process::id().to_string()),
                 Err(err) => {
                     show_startup_error(
                         &app_handle,
@@ -449,8 +541,8 @@ pub fn run() {
                                     let ready_handle = handle.clone();
                                     let ready_completion = event_completion.clone();
                                     tauri::async_runtime::spawn(async move {
-                                        let ready = match tauri::async_runtime::spawn_blocking(
-                                            move || {
+                                        let ready =
+                                            match tauri::async_runtime::spawn_blocking(move || {
                                                 wait_for_backend_ready(
                                                     addr,
                                                     startup_deadline,
@@ -458,18 +550,20 @@ pub fn run() {
                                                     std::thread::sleep,
                                                     Instant::now,
                                                 )
-                                            },
-                                        )
-                                        .await
-                                        {
-                                            Ok(ready) => ready,
-                                            Err(err) => {
-                                                eprintln!(
-                                                    "[uh-desktop] backend readiness task failed: {err}"
-                                                );
-                                                false
-                                            }
-                                        };
+                                            })
+                                            .await
+                                            {
+                                                Ok(ready) => ready,
+                                                Err(err) => {
+                                                    log_event(
+                                                        &ready_handle,
+                                                        format!(
+                                                            "backend readiness task failed: {err}"
+                                                        ),
+                                                    );
+                                                    false
+                                                }
+                                            };
 
                                         if ready {
                                             complete_startup_success(
@@ -490,10 +584,16 @@ pub fn run() {
                             }
                         }
                         CommandEvent::Stderr(bytes) => {
-                            eprintln!("[uh-backend] {}", String::from_utf8_lossy(&bytes));
+                            log_event(
+                                &handle,
+                                format!(
+                                    "[uh-backend] {}",
+                                    String::from_utf8_lossy(&bytes).trim_end()
+                                ),
+                            );
                         }
                         CommandEvent::Error(err) => {
-                            eprintln!("[uh-backend] error: {err}");
+                            log_event(&handle, format!("[uh-backend] error: {err}"));
                             complete_startup_error(
                                 &handle,
                                 &event_completion,
@@ -502,7 +602,10 @@ pub fn run() {
                             break;
                         }
                         CommandEvent::Terminated(payload) => {
-                            eprintln!("[uh-backend] terminated before readiness: {payload:?}");
+                            log_event(
+                                &handle,
+                                format!("[uh-backend] terminated before readiness: {payload:?}"),
+                            );
                             complete_startup_error(
                                 &handle,
                                 &event_completion,
@@ -515,11 +618,7 @@ pub fn run() {
                 }
 
                 if !event_completion.is_complete() {
-                    complete_startup_error(
-                        &handle,
-                        &event_completion,
-                        "本地后端启动输出已关闭",
-                    );
+                    complete_startup_error(&handle, &event_completion, "本地后端启动输出已关闭");
                 }
             });
 
@@ -546,39 +645,116 @@ pub fn run() {
     });
 }
 
-/// Check GitHub Releases for an update; on install, kill the sidecar then relaunch.
+/// Text of the "new version" prompt; release notes are shortened to keep the
+/// native dialog readable.
+fn format_update_prompt(current: &str, latest: &str, notes: Option<&str>) -> String {
+    let mut text = format!("学道 {latest} 已发布，你现在用的是 {current}。\n\n");
+    if let Some(notes) = notes.map(str::trim).filter(|notes| !notes.is_empty()) {
+        let mut shortened: String = notes.chars().take(UPDATE_NOTES_MAX_CHARS).collect();
+        if notes.chars().count() > UPDATE_NOTES_MAX_CHARS {
+            shortened.push('…');
+        }
+        text.push_str(&shortened);
+        text.push_str("\n\n");
+    }
+    text.push_str("更新会下载新版本并重启学道，正在运行的任务会中断。要现在更新吗？");
+    text
+}
+
+/// Check GitHub Releases for an update and ask before installing it.
 async fn check_for_updates(app: AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
 
-    let updater = match app.updater() {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("updater unavailable: {e}");
+    let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(UPDATE_CHECK_DELAY)).await;
+
+    let exit_handle = app.clone();
+    let updater = match app
+        .updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        // On Windows the installer is launched and the process exits inside
+        // download_and_install, so the sidecar must be stopped here; replacing
+        // the hook also replaces the default cleanup, which is called explicitly.
+        .on_before_exit(move || {
+            kill_sidecar(&exit_handle);
+            exit_handle.cleanup_before_exit();
+        })
+        .build()
+    {
+        Ok(updater) => updater,
+        Err(err) => {
+            log_event(&app, format!("updater unavailable: {err}"));
             return;
         }
     };
-    match updater.check().await {
-        Ok(Some(update)) => {
-            if let Err(e) = update
-                .download_and_install(|_chunk, _total| {}, || {})
-                .await
-            {
-                eprintln!("update install failed: {e}");
-                return;
-            }
-            kill_sidecar(&app); // free the loopback port before relaunch
-            app.restart();
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => return,
+        Err(err) => {
+            log_event(&app, format!("update check failed: {err}"));
+            return;
         }
-        Ok(None) => { /* already up to date */ }
-        Err(e) => eprintln!("update check failed: {e}"),
+    };
+
+    log_event(
+        &app,
+        format!(
+            "update available: {} -> {}",
+            update.current_version, update.version
+        ),
+    );
+    let prompt = format_update_prompt(
+        &update.current_version,
+        &update.version,
+        update.body.as_deref(),
+    );
+    let dialog_handle = app.clone();
+    let accepted = tauri::async_runtime::spawn_blocking(move || {
+        dialog_handle
+            .dialog()
+            .message(prompt)
+            .title("学道有新版本")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "现在更新".to_string(),
+                "稍后".to_string(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .unwrap_or(false);
+
+    if !accepted {
+        log_event(&app, "update postponed by the user");
+        return;
     }
+
+    if let Err(err) = update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+    {
+        log_event(&app, format!("update install failed: {err}"));
+        app.dialog()
+            .message(format!(
+                "更新没有装上：{err}\n\n可以稍后重启学道再试，或到 GitHub Releases 下载最新安装包。"
+            ))
+            .title("学道更新失败")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+        return;
+    }
+    log_event(&app, "update installed; restarting");
+    kill_sidecar(&app); // free the loopback port before relaunch
+    app.restart();
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        clamped_timeout, complete_startup_once, http_response_is_ok, loopback_http_ok,
-        run_startup_watchdog, wait_for_backend_ready, write_all_before_deadline, StartupCompletion,
+        append_log_line, clamped_timeout, complete_startup_once, format_update_prompt,
+        http_response_is_ok, loopback_http_ok, run_startup_watchdog, wait_for_backend_ready,
+        write_all_before_deadline, StartupCompletion, LOG_FILE_NAME, UPDATE_NOTES_MAX_CHARS,
     };
     use std::cell::Cell;
     use std::io::{self, Read, Write};
@@ -913,5 +1089,44 @@ mod tests {
         assert!(ready);
         assert!(elapsed < Duration::from_millis(500));
         assert!(server_joined);
+    }
+
+    #[test]
+    fn update_prompt_names_both_versions_and_warns_about_restart() {
+        let text = format_update_prompt("1.4.6", "1.4.7", Some("- 修复注册失败"));
+        assert!(text.contains("1.4.7"));
+        assert!(text.contains("1.4.6"));
+        assert!(text.contains("- 修复注册失败"));
+        assert!(text.contains("任务会中断"));
+    }
+
+    #[test]
+    fn update_prompt_skips_empty_notes_and_truncates_long_ones() {
+        let empty = format_update_prompt("1.4.6", "1.4.7", Some("   "));
+        assert!(!empty.contains("\n\n\n"));
+
+        let long_notes = "字".repeat(UPDATE_NOTES_MAX_CHARS + 50);
+        let long = format_update_prompt("1.4.6", "1.4.7", Some(&long_notes));
+        assert!(long.contains('…'));
+        assert!(long.chars().filter(|c| *c == '字').count() == UPDATE_NOTES_MAX_CHARS);
+    }
+
+    #[test]
+    fn log_lines_are_appended_and_rotated() {
+        let dir = std::env::temp_dir().join(format!("uh-desktop-log-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        append_log_line(&dir, "first");
+        append_log_line(&dir, "second");
+        let content = std::fs::read_to_string(dir.join(LOG_FILE_NAME)).unwrap_or_default();
+        assert!(content.contains("first") && content.contains("second"));
+
+        let big = vec![b'x'; 1024 * 1024 + 10];
+        assert!(std::fs::write(dir.join(LOG_FILE_NAME), big).is_ok());
+        append_log_line(&dir, "after rotation");
+        let rotated = dir.join(format!("{LOG_FILE_NAME}.1"));
+        assert!(rotated.exists());
+        let fresh = std::fs::read_to_string(dir.join(LOG_FILE_NAME)).unwrap_or_default();
+        assert!(fresh.contains("after rotation") && fresh.len() < 100);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
