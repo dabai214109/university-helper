@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useRuntimeProfile } from '../../../components'
 import { isAuthenticated, removeToken } from '../../../utils/auth'
 import { api } from '../../../utils/api'
 import { readLastUsername, saveLastUsername } from '../../../utils/chaoxingCreds'
@@ -10,6 +11,7 @@ export default function useAuthentication({ stopPolling }) {
 
 
   const navigate = useNavigate()
+  const { isLocal } = useRuntimeProfile()
 
 
   // Recall the account shared with the signin page so it isn't retyped here.
@@ -54,7 +56,7 @@ export default function useAuthentication({ stopPolling }) {
   useEffect(() => {
 
 
-    if (!isAuthenticated()) {
+    if (!isLocal && !isAuthenticated()) {
 
 
       navigate('/login', { replace: true })
@@ -63,7 +65,7 @@ export default function useAuthentication({ stopPolling }) {
     }
 
 
-  }, [navigate])
+  }, [isLocal, navigate])
 
 
   const onAuthError = useCallback(
@@ -72,7 +74,7 @@ export default function useAuthentication({ stopPolling }) {
     (message) => {
 
 
-      if (TOKEN_ERROR.test(String(message || ''))) {
+      if (!isLocal && TOKEN_ERROR.test(String(message || ''))) {
 
 
         stopPolling()
@@ -96,7 +98,7 @@ export default function useAuthentication({ stopPolling }) {
     },
 
 
-    [navigate, stopPolling]
+    [isLocal, navigate, stopPolling]
 
 
   )
@@ -183,6 +185,8 @@ export default function useAuthentication({ stopPolling }) {
 
       const loginUsername = username.trim()
       const loginPassword = password
+
+
       setError('')
 
 

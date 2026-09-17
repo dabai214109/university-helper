@@ -8,9 +8,9 @@
     "build": "vite build",
     "build:analyze": "ANALYZE=1 vite build",
     "preview": "vite preview",
-    "test": "vitest",
-    "test:ui": "vitest --ui",
-    "test:ci": "vitest run --coverage",
+    "test": "node ./scripts/run-vitest.mjs",
+    "test:ui": "node ./scripts/run-vitest.mjs --ui",
+    "test:ci": "node ./scripts/run-vitest.mjs run --coverage",
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write \"src/**/*.{js,jsx,json,css}\"",
     "tauri": "tauri"

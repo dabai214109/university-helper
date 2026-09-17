@@ -1,4 +1,4 @@
-import { act } from 'react-dom/test-utils'
+import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -156,9 +156,13 @@ describe('ChaoxingSignin location flow', () => {
   test('fills latitude and longitude after resolving an address', async () => {
     await act(async () => {
       root.render(
-        <MemoryRouter>
-          <ChaoxingSignin />
-        </MemoryRouter>
+        <RuntimeProfileContext.Provider value={{ profile: 'server', isLocal: false, requiresAuth: true, loading: false }}>
+          <ToastProvider>
+            <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+              <ChaoxingSignin />
+            </MemoryRouter>
+          </ToastProvider>
+        </RuntimeProfileContext.Provider>
       )
     })
 
@@ -210,9 +214,13 @@ describe('ChaoxingSignin location flow', () => {
   test('lets the user search a place and pick a result', async () => {
     await act(async () => {
       root.render(
-        <MemoryRouter>
-          <ChaoxingSignin />
-        </MemoryRouter>
+        <RuntimeProfileContext.Provider value={{ profile: 'server', isLocal: false, requiresAuth: true, loading: false }}>
+          <ToastProvider>
+            <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+              <ChaoxingSignin />
+            </MemoryRouter>
+          </ToastProvider>
+        </RuntimeProfileContext.Provider>
       )
     })
 

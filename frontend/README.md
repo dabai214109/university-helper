@@ -1,6 +1,6 @@
-# 签到刷课平台 - 统一前端
+# 学道 · 课程任务工作台
 
-基于 React + Vite + TailwindCSS 的统一前端界面，整合三个子项目。
+基于 React、Vite 与 Tailwind CSS 的统一前端，整合学习通签到、学习通泛雅和智慧树课程任务。
 
 ## 技术栈
 
@@ -37,20 +37,20 @@ frontend/
 
 ## 功能特性
 
-- JWT Token 认证（存储在 localStorage）
-- 统一导航栏与返回按钮
-- 响应式设计（移动端适配）
-- Glassmorphism 设计风格
-- iframe 嵌入三个子项目前端
+- Server profile 使用 JWT 认证，令牌只存储在当前标签页的 `sessionStorage`
+- Local profile（Tauri）无需学道账号即可直接进入工作台
+- 统一导航、任务状态、Toast 与 light/dark/system 主题
+- 响应式布局与键盘可访问的服务切换、页签控制
+- 三项服务按路由懒加载，地图和二维码依赖保持独立 chunk
 
 ## 路由结构
 
 - `/login` - 登录页
 - `/register` - 注册页
-- `/dashboard` - 用户仪表盘（三个服务入口）
-- `/chaoxing-signin` - 超星签到（iframe: localhost:3001）
-- `/chaoxing-fanya` - 超星刷课（iframe: localhost:3002）
-- `/zhihuishu` - 智慧树刷课（iframe: localhost:3003）
+- `/dashboard` - 今日课程任务工作台
+- `/chaoxing-signin` - 学习通签到
+- `/chaoxing-fanya` - 学习通泛雅课程任务
+- `/zhihuishu-panel` - 智慧树课程任务
 
 ## 开发运行
 
@@ -77,13 +77,12 @@ npm run preview
 
 ## 设计系统
 
-- 主色：#2563EB (primary)
-- 次色：#3B82F6 (secondary)
-- CTA：#F97316 (cta)
-- 背景：#F8FAFC
-- 文字：#1E293B
-- 字体：Inter
-- 风格：Glassmorphism（毛玻璃效果）
+- 校园青：`#167C80`（主操作与进行中）
+- 墨蓝：`#172033`（正文与夜间基底）
+- 荧光橙：`#FF7A45`（下一步与注意事项）
+- 讲义纸：`#F4F6F1`（日间背景）
+- 中文字体：`PingFang SC` / `Microsoft YaHei` / system-ui
+- 视觉主题：课程表 × 夜间自习台；课表网格和今日任务轨道用于表达真实流程状态
 
 ## 可访问性
 
