@@ -3,6 +3,37 @@ from fastapi.testclient import TestClient
 from tests.conftest import build_app
 
 
+def test_runtime_profile_is_public_and_reports_server_policy():
+    with build_app("server", ENFORCE_HTTPS="false") as app:
+        client = TestClient(app, base_url="http://localhost")
+        resp = client.get("/api/v1/runtime")
+    assert resp.status_code == 200
+    assert resp.json() == {"profile": "server", "requires_auth": True}
+
+
+def test_security_headers_allow_only_same_origin_geolocation():
+    with build_app("server", ENFORCE_HTTPS="false") as app:
+        client = TestClient(app, base_url="http://localhost")
+        resp = client.get("/api/v1/runtime")
+
+    assert resp.status_code == 200
+    assert resp.headers["Permissions-Policy"] == (
+        "geolocation=(self), microphone=(), camera=(), payment=()"
+    )
+
+
+def test_runtime_profile_reports_local_without_exposing_settings():
+    with build_app(
+        "local",
+        ENFORCE_HTTPS="false",
+        CORS_ORIGINS='["http://127.0.0.1:8000"]',
+    ) as app:
+        client = TestClient(app, base_url="http://127.0.0.1:8000")
+        resp = client.get("/api/v1/runtime")
+    assert resp.status_code == 200
+    assert resp.json() == {"profile": "local", "requires_auth": False}
+
+
 def test_local_no_301_redirect_on_plain_http_loopback():
     # The env Workstream D injects for the desktop build (asserted here, not implemented):
     #   PROFILE=local, ENV=dev, STORAGE_BACKEND=sqlite,

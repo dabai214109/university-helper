@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import auth, chaoxing
-from app.api.v1.course import cleanup_expired_entries
+from app.api.v1.course import cancel_all_qr_sessions, cleanup_expired_entries
 from app.api.v1.metrics import record_request
 from app.api.v1.metrics import router as metrics_router
 from app.config import LOCAL_USER_ID, settings
@@ -31,8 +31,8 @@ _LOCAL_SPA_CSP = "; ".join(
     [
         "default-src 'self'",
         "script-src 'self'",
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-        "font-src 'self' data: https://fonts.gstatic.com",
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
         "img-src 'self' data: blob: https:",
         "connect-src 'self'",
         "manifest-src 'self'",
@@ -94,6 +94,7 @@ async def lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+        cancel_all_qr_sessions()
 
 
 app = FastAPI(
@@ -178,7 +179,7 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault(
         "Permissions-Policy",
-        "geolocation=(), microphone=(), camera=(), payment=()",
+        "geolocation=(self), microphone=(), camera=(), payment=()",
     )
     response.headers.setdefault("Content-Security-Policy", _content_security_policy_for(request))
     if settings.ENFORCE_HTTPS:
@@ -289,6 +290,16 @@ async def root():
     if _SPA_DIST is not None:
         return FileResponse(_SPA_DIST / "index.html")
     return {"message": "University Helper API"}
+
+
+@app.get("/api/v1/runtime", include_in_schema=False)
+def runtime_profile():
+    """Expose only the capabilities the SPA needs to choose its auth flow."""
+    is_local = settings.PROFILE == "local"
+    return {
+        "profile": settings.PROFILE,
+        "requires_auth": not is_local,
+    }
 
 
 @app.get("/health")
