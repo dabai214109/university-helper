@@ -19,6 +19,8 @@ services:
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
       ENFORCE_HTTPS: "false"
       ENV: ${ENV:-production}
       # When REDIS_URL is set, app/core/redis_session_store.SessionStore writes

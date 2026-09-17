@@ -13,6 +13,7 @@ os.environ.setdefault("MAIN_DB_PASSWORD", "test_password")
 os.environ.setdefault("ENFORCE_HTTPS", "false")
 # Tests that run the app lifespan must not try to create databases.
 os.environ.setdefault("DB_AUTO_BOOTSTRAP", "false")
+os.environ.setdefault("UPDATE_CHECK_ENABLED", "false")
 
 
 @pytest.fixture

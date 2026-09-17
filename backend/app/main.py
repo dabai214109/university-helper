@@ -87,6 +87,21 @@ async def _run_db_bootstrap(app: FastAPI, stop_event: threading.Event) -> None:
     app.state.schema_status = await asyncio.to_thread(run_bootstrap_with_retry, stop_event)
 
 
+def _update_check_enabled() -> bool:
+    return settings.PROFILE != "local" and settings.UPDATE_CHECK_ENABLED
+
+
+async def _update_check_loop(checker) -> None:
+    # Give the app a moment to finish starting before the first outbound call.
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await checker.refresh()
+        except Exception:
+            logger.exception("update check iteration failed")
+        await asyncio.sleep(max(60, settings.UPDATE_CHECK_INTERVAL_SECONDS))
+
+
 async def _cancel_task(task: asyncio.Task | None) -> None:
     if task is None:
         return
@@ -113,12 +128,24 @@ async def lifespan(app: FastAPI):
         # Runs in the background so a slow or still-initialising Postgres never
         # blocks startup; /health reports the outcome in its `schema` field.
         app.state.db_bootstrap_task = asyncio.create_task(_run_db_bootstrap(app, bootstrap_stop))
+    app.state.update_checker = None
+    app.state.update_check_task = None
+    if _update_check_enabled():
+        from app.services.update_check import UpdateChecker
+
+        app.state.update_checker = UpdateChecker(
+            current_version=app.version,
+            url=settings.UPDATE_CHECK_URL,
+            ttl_seconds=settings.UPDATE_CHECK_INTERVAL_SECONDS,
+        )
+        app.state.update_check_task = asyncio.create_task(_update_check_loop(app.state.update_checker))
     try:
         yield
     finally:
         bootstrap_stop.set()
         await _cancel_task(getattr(app.state, "cleanup_task", None))
         await _cancel_task(getattr(app.state, "db_bootstrap_task", None))
+        await _cancel_task(getattr(app.state, "update_check_task", None))
         cancel_all_qr_sessions()
 
 
@@ -305,6 +332,12 @@ from app.api.v1 import course
 app.include_router(course.router, prefix="/api/v1/course", tags=["course"])
 app.include_router(chaoxing.router, prefix="/api/v1/chaoxing", tags=["chaoxing"])
 app.include_router(metrics_router, tags=["metrics"])
+
+if settings.PROFILE != "local":
+    # Update notices for server administrators; the desktop app updates itself.
+    from app.api.v1 import system
+
+    app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 
 
 # PROFILE=local: inject the implicit single-user identity so the HTTPBearer

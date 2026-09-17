@@ -3,6 +3,7 @@ import { BookOpen, CheckCircle, GraduationCap, LayoutGrid, LogOut } from 'lucide
 import { removeToken } from '../utils/auth'
 import { useRuntimeProfile } from './runtimeProfileContext'
 import ThemeToggle from './ThemeToggle'
+import UpdateNotice from './UpdateNotice'
 
 const NAV = [
   { to: '/dashboard', label: '工作台', shortLabel: '总览', icon: LayoutGrid },
@@ -110,6 +111,7 @@ export default function AppLayout() {
       <main id="main-content" tabIndex="-1" className="mx-auto max-w-7xl px-4 py-6 focus:outline-none sm:px-6 sm:py-8">
         <Outlet />
       </main>
+      {!isLocal && <UpdateNotice />}
     </div>
   )
 }

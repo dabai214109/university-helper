@@ -28,6 +28,8 @@ services:
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
       # nginx (web container / host) terminates TLS; the app must not redirect
       # http->https itself or it would loop / break plain-IP access.
       ENFORCE_HTTPS: "false"

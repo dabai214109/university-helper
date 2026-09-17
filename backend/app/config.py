@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     # Directory holding 00-schema.sql and tenant_template.sql (auto-detected when empty).
     DB_BOOTSTRAP_SQL_DIR: str = ""
 
+    # Administrators (server edition): comma-separated emails. When empty, the
+    # first registered account (smallest users.id) is the administrator.
+    ADMIN_EMAILS: str = ""
+
+    # New-release notice for administrators. The server polls GitHub Releases;
+    # set UPDATE_CHECK_ENABLED=false on air-gapped installs.
+    UPDATE_CHECK_ENABLED: bool = True
+    UPDATE_CHECK_INTERVAL_SECONDS: int = 6 * 3600
+    UPDATE_CHECK_URL: str = "https://api.github.com/repos/sweetcornna/university-helper/releases/latest"
+
     @field_validator("SECRET_KEY")
     @classmethod
     def _secret_key_present(cls, v: str) -> str:
