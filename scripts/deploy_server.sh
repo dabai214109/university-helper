@@ -42,7 +42,10 @@ DB_VOLUME="${PROJECT}_shuake-postgres-data"
 # China mirror for the frontend build in --build mode; release CI uses the
 # public npm registry on GitHub-hosted runners. Override with
 # BUILD_NPM_REGISTRY= (empty) to use the default public registry.
-BUILD_NPM_REGISTRY="${BUILD_NPM_REGISTRY:-https://registry.npmmirror.com}"
+BUILD_NPM_REGISTRY="${BUILD_NPM_REGISTRY-https://registry.npmmirror.com}"
+# Dockerfile.server defaults to a China PyPI mirror; set this (for example to
+# https://pypi.org/simple) when building elsewhere.
+BUILD_PIP_INDEX_URL="${BUILD_PIP_INDEX_URL:-}"
 
 DOMAIN=""
 DOMAIN_PROVIDED="0"
@@ -540,7 +543,12 @@ show_start_failure() {
 deploy() {
   if [[ "$MODE" == "build" ]]; then
     info "Building images from source (this can take a few minutes)…"
-    "${DOCKER[@]}" build -f Dockerfile.server -t "${IMAGE_NS}/university-helper-app:local" .
+    local -a app_build_args=()
+    if [[ -n "$BUILD_PIP_INDEX_URL" ]]; then
+      app_build_args=(--build-arg "PIP_INDEX_URL=${BUILD_PIP_INDEX_URL}")
+    fi
+    "${DOCKER[@]}" build -f Dockerfile.server ${app_build_args[@]+"${app_build_args[@]}"} \
+      -t "${IMAGE_NS}/university-helper-app:local" .
     "${DOCKER[@]}" build -f Dockerfile.web --build-arg "NPM_REGISTRY=${BUILD_NPM_REGISTRY}" \
       -t "${IMAGE_NS}/university-helper-web:local" .
     export UH_TAG="local"

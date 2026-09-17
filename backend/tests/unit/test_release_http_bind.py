@@ -630,3 +630,54 @@ def test_powershell_deploy_rejects_invalid_domain_before_side_effects(tmp_path, 
     assert result.stdout.strip() == "[x] Invalid --domain: expected an ASCII FQDN (for example example.com)."
     assert not docker_log.exists()
     assert not (wrapper.parent / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "app_arg", "web_arg"),
+    [
+        ({}, None, "--build-arg NPM_REGISTRY=https://registry.npmmirror.com "),
+        (
+            {"BUILD_PIP_INDEX_URL": "https://pypi.org/simple", "BUILD_NPM_REGISTRY": ""},
+            "--build-arg PIP_INDEX_URL=https://pypi.org/simple ",
+            "--build-arg NPM_REGISTRY= ",
+        ),
+    ],
+)
+def test_bash_build_mode_honours_package_mirror_overrides(tmp_path, extra_env, app_arg, web_arg):
+    root, env, docker_log = _bash_deploy_fixture(tmp_path)
+    _write_executable(
+        root / "bin" / "docker",
+        f"""
+        #!/usr/bin/env bash
+        printf '%s\\n' "$*" >> "{docker_log}"
+        if [[ "$1" == "--version" ]]; then
+          echo "Docker version 29.4.1, build test"
+        elif [[ "$1" == "compose" && "$2" == "version" ]]; then
+          echo "Docker Compose version v2.32.0"
+        elif [[ "$1" == "volume" ]]; then
+          exit 1
+        fi
+        exit 0
+        """,
+    )
+    env.update(extra_env)
+
+    result = subprocess.run(
+        ["bash", "scripts/deploy_server.sh", "--build", "-y", "--no-tls"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = docker_log.read_text().splitlines()
+    app_build = next(line for line in lines if line.startswith("build -f Dockerfile.server"))
+    web_build = next(line for line in lines if line.startswith("build -f Dockerfile.web"))
+    if app_arg is None:
+        assert "--build-arg" not in app_build
+    else:
+        assert app_arg in app_build
+    assert web_arg in web_build
