@@ -89,6 +89,18 @@ def test_server_runtime_does_not_persist_pip_index_url():
     assert "apt-mirror-selection" in runtime
 
 
+def test_server_image_bundles_schema_files_for_startup_repair():
+    dockerfile = (REPO_ROOT / "Dockerfile.server").read_text()
+    runtime = dockerfile.split("# ---------- runtime ----------", 1)[1]
+
+    assert (
+        "COPY --chown=app:app database/00-schema.sql database/templates/tenant_template.sql /srv/backend/app/db/sql/"
+        in runtime
+    )
+    for path in ("database/00-schema.sql", "database/templates/tenant_template.sql"):
+        assert (REPO_ROOT / path).is_file()
+
+
 def test_release_sidecar_install_uses_the_bounded_pyinstaller_dev_requirement():
     requirement = _pyinstaller_requirement()
     run_script = _desktop_sidecar_install_step()["run"]

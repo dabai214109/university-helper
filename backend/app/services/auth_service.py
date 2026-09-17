@@ -172,8 +172,18 @@ class AuthService:
 
     @staticmethod
     def _heal_missing_template() -> bool:
-        """Hook for recreating a missing tenant_template. Returns True if healed."""
-        return False
+        """Try to rebuild a missing tenant_template once. Returns True if healed."""
+        if settings.PROFILE == "local" or not settings.DB_AUTO_BOOTSTRAP:
+            return False
+        from app.db.bootstrap import ensure_tenant_template
+
+        try:
+            ensure_tenant_template()
+        except Exception:
+            logger.exception("Automatic tenant_template repair failed")
+            return False
+        logger.warning("tenant_template was missing and has been rebuilt")
+        return True
 
     @staticmethod
     def _drop_tenant_database(tenant_db_name: str) -> None:

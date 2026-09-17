@@ -47,6 +47,15 @@ entrypoint 会按文件名顺序执行以下文件（已有数据卷不会重复
 LF 换行；如果在 Windows 上用别的方式拷贝导致变成 CRLF，初始化会中途
 失败，数据库里就不会有 `tenant_template`。
 
+### 应用启动时的自检与修复
+
+服务器版 app 启动后会在后台检查 `users` 表和 `tenant_template` 库，缺哪个就用
+镜像里自带的 `00-schema.sql` 和 `tenant_template.sql` 补上（`backend/app/db/bootstrap.py`）。
+所以数据卷没有跑过初始化脚本时，通常重启一次 app 就能恢复注册。检查结果写在
+`/health` 的 `schema` 字段：`ok`、`missing_users`、`missing_tenant_template` 或
+`unknown`。数据库账号没有 CREATEDB 权限时修复会失败，日志里会说明原因。
+设置 `DB_AUTO_BOOTSTRAP=false` 可以关闭这个行为。
+
 ### 宿主机手工初始化
 
 以下命令均从仓库根目录执行；仅在对应数据库尚不存在时运行 `createdb`：

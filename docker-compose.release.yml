@@ -27,6 +27,7 @@ services:
       SHUAKE_COMPAT_SECRET: ${SHUAKE_COMPAT_SECRET:-}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
       # nginx (web container / host) terminates TLS; the app must not redirect
       # http->https itself or it would loop / break plain-IP access.
       ENFORCE_HTTPS: "false"

@@ -50,6 +50,9 @@ RUN pip install --no-cache-dir --find-links=/wheels --no-index $(ls /wheels/*.wh
     && rm -rf /wheels
 
 COPY --chown=app:app backend /srv/backend
+# Schema files for app/db/bootstrap.py: lets the app rebuild the users table and
+# tenant_template when the Postgres init scripts never ran on this volume.
+COPY --chown=app:app database/00-schema.sql database/templates/tenant_template.sql /srv/backend/app/db/sql/
 
 USER app
 

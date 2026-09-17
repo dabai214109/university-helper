@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -15,12 +15,13 @@ from app.api.v1 import auth, chaoxing
 from app.api.v1.course import cancel_all_qr_sessions, cleanup_expired_entries
 from app.api.v1.metrics import record_request
 from app.api.v1.metrics import router as metrics_router
-from app.config import LOCAL_USER_ID, settings
+from app.config import LOCAL_USER_ID, settings, split_csv
 from app.core.credential_crypto import init_cipher
 from app.core.exceptions import AppException, LocalProfileAuthUnavailable
 from app.core.logging_setup import configure_logging
 from app.core.tracing import configure_tracing
 from app.dependencies import get_current_user, get_current_user_id
+from app.middleware.allowed_hosts import AllowedHostsMiddleware
 from app.middleware.tenant_isolation import tenant_isolation_middleware
 from app.storage.factory import get_storage
 
@@ -63,6 +64,8 @@ def _validate_runtime_settings() -> None:
         bad = [o for o in origins if o.startswith("http://") and "localhost" not in o]
         if bad:
             raise RuntimeError(f"CORS_ORIGINS in production must use https://: {bad}")
+        if "*" in split_csv(settings.ALLOWED_HOSTS):
+            raise RuntimeError("ALLOWED_HOSTS='*' is not allowed in production")
 
 
 async def _periodic_cleanup_loop() -> None:
@@ -72,6 +75,26 @@ async def _periodic_cleanup_loop() -> None:
         except Exception:
             logger.exception("cleanup_expired_entries iteration failed")
         await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
+
+
+def _db_bootstrap_enabled() -> bool:
+    return settings.PROFILE != "local" and settings.STORAGE_BACKEND == "postgres" and settings.DB_AUTO_BOOTSTRAP
+
+
+async def _run_db_bootstrap(app: FastAPI, stop_event: threading.Event) -> None:
+    from app.db.bootstrap import run_bootstrap_with_retry
+
+    app.state.schema_status = await asyncio.to_thread(run_bootstrap_with_retry, stop_event)
+
+
+async def _cancel_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @asynccontextmanager
@@ -84,16 +107,18 @@ async def lifespan(app: FastAPI):
     # Opt-in OTel tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set.
     configure_tracing(app)
     app.state.cleanup_task = asyncio.create_task(_periodic_cleanup_loop())
+    bootstrap_stop = threading.Event()
+    app.state.db_bootstrap_task = None
+    if _db_bootstrap_enabled():
+        # Runs in the background so a slow or still-initialising Postgres never
+        # blocks startup; /health reports the outcome in its `schema` field.
+        app.state.db_bootstrap_task = asyncio.create_task(_run_db_bootstrap(app, bootstrap_stop))
     try:
         yield
     finally:
-        task = getattr(app.state, "cleanup_task", None)
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        bootstrap_stop.set()
+        await _cancel_task(getattr(app.state, "cleanup_task", None))
+        await _cancel_task(getattr(app.state, "db_bootstrap_task", None))
         cancel_all_qr_sessions()
 
 
@@ -108,8 +133,8 @@ app = FastAPI(
 )
 
 
-def _build_allowed_hosts(origins: list[str]) -> list[str]:
-    hosts = {"localhost", "127.0.0.1"}
+def _build_allowed_hosts(origins: list[str], extra: list[str] | None = None) -> list[str]:
+    hosts = {"localhost", "127.0.0.1", *(extra or [])}
     for origin in origins:
         value = str(origin or "").strip()
         if not value:
@@ -192,8 +217,8 @@ async def security_headers_middleware(request: Request, call_next):
 
 # Host-header validation (NOT CSRF — CSRF would need cookie-based auth + token).
 app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=_build_allowed_hosts(settings.CORS_ORIGINS),
+    AllowedHostsMiddleware,
+    allowed_hosts=_build_allowed_hosts(settings.CORS_ORIGINS, split_csv(settings.ALLOWED_HOSTS)),
 )
 
 app.add_middleware(
@@ -320,8 +345,20 @@ def health():
     cleanup_alive = bool(cleanup_task and not cleanup_task.done())
     if not get_storage().probe.ping():
         raise HTTPException(status_code=503, detail="db unavailable")
-    status = "ok" if cleanup_alive else "degraded"
-    return {"status": status, "db": "ok", "cleanup_task": "alive" if cleanup_alive else "dead"}
+    body = {
+        "status": "ok" if cleanup_alive else "degraded",
+        "db": "ok",
+        "cleanup_task": "alive" if cleanup_alive else "dead",
+    }
+    if settings.PROFILE != "local" and settings.STORAGE_BACKEND == "postgres":
+        from app.db.bootstrap import cached_schema_status
+
+        # Registration needs the users table and tenant_template; a missing one
+        # keeps the site up (200) but is reported so installers and operators see it.
+        body["schema"] = cached_schema_status()
+        if body["schema"] != "ok":
+            body["status"] = "degraded"
+    return body
 
 
 def _mount_spa(application: FastAPI, dist: Path) -> None:

@@ -18,6 +18,7 @@ services:
       SHUAKE_COMPAT_SECRET: ${SHUAKE_COMPAT_SECRET}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
       ENFORCE_HTTPS: "false"
       ENV: ${ENV:-production}
       # When REDIS_URL is set, app/core/redis_session_store.SessionStore writes

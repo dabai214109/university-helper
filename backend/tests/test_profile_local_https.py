@@ -78,3 +78,31 @@ def test_loopback_host_accepted_by_trustedhost():
         client = TestClient(app, base_url="http://127.0.0.1:8000")
         resp = client.get("/api/v1/course/zhihuishu/status", follow_redirects=False)
     assert resp.status_code != 400  # not "Invalid host header"
+
+
+def test_allowed_hosts_setting_admits_lan_ip_and_wildcard_domain():
+    with build_app("server", ENFORCE_HTTPS="false", ALLOWED_HOSTS="192.168.1.10, *.uh.lan") as app:
+        client = TestClient(app, raise_server_exceptions=False)
+        lan = client.get("/api/v1/runtime", headers={"host": "192.168.1.10:8080"})
+        wildcard = client.get("/api/v1/runtime", headers={"host": "school.uh.lan"})
+        rejected = client.get("/api/v1/runtime", headers={"host": "evil.test"})
+
+    assert lan.status_code == 200
+    assert wildcard.status_code == 200
+    assert rejected.status_code == 400
+    body = rejected.json()
+    assert body["code"] == "InvalidHost"
+    assert "ALLOWED_HOSTS" in body["message"]
+    assert "Invalid host header" in body["message"]
+
+
+def test_wildcard_allowed_hosts_rejected_in_production():
+    with build_app("server", ENFORCE_HTTPS="false", ALLOWED_HOSTS="*", ENV="production", CORS_ORIGINS='["https://uh.example.com"]'):
+        import app.main as main_mod
+
+        try:
+            main_mod._validate_runtime_settings()
+        except RuntimeError as exc:
+            assert "ALLOWED_HOSTS" in str(exc)
+        else:  # pragma: no cover - assertion path
+            raise AssertionError("production must reject ALLOWED_HOSTS='*'")
