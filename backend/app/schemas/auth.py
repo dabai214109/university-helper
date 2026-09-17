@@ -6,6 +6,11 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 # tenant database names as `tenant_{username}` and only accepts [a-z0-9]+.
 USERNAME_RE = re.compile(r"^[a-z0-9]+$")
 
+# Usernames that would map onto PostgreSQL's own databases. `template` is the
+# dangerous one: `tenant_template` is the database every tenant is cloned from.
+RESERVED_USERNAMES = frozenset({"template", "template0", "template1", "postgres", "main", "maindb", "root", "system"})
+RESERVED_USERNAME_MESSAGE = "该用户名为系统保留名称，请换一个"
+
 
 class RegisterRequest(BaseModel):
     username: str
@@ -19,6 +24,8 @@ class RegisterRequest(BaseModel):
             raise ValueError("用户名长度需为 3-30 个字符")
         if not USERNAME_RE.match(v):
             raise ValueError("用户名只能包含小写字母和数字（a-z、0-9）")
+        if v in RESERVED_USERNAMES:
+            raise ValueError(RESERVED_USERNAME_MESSAGE)
         return v
 
     @field_validator("password")

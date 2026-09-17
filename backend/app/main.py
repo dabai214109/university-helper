@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -17,7 +17,7 @@ from app.api.v1.metrics import record_request
 from app.api.v1.metrics import router as metrics_router
 from app.config import LOCAL_USER_ID, settings
 from app.core.credential_crypto import init_cipher
-from app.core.exceptions import AppException
+from app.core.exceptions import AppException, LocalProfileAuthUnavailable
 from app.core.logging_setup import configure_logging
 from app.core.tracing import configure_tracing
 from app.dependencies import get_current_user, get_current_user_id
@@ -260,8 +260,20 @@ def resolve_frontend_dist() -> Path | None:
     return None
 
 
+def _reject_auth_in_local_profile() -> None:
+    raise LocalProfileAuthUnavailable("桌面版不需要注册或登录，直接使用即可")
+
+
 # Routes
-app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+# The desktop build has no users table (SQLite, psycopg2 not bundled), so
+# register/login would crash with a 500. Answer with a clear 409 instead; the SPA
+# uses it as a signal to re-read /api/v1/runtime and skip the auth pages.
+app.include_router(
+    auth.router,
+    prefix="/api/v1/auth",
+    tags=["auth"],
+    dependencies=[Depends(_reject_auth_in_local_profile)] if settings.PROFILE == "local" else [],
+)
 
 from app.api.v1 import course
 
