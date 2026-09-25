@@ -7,12 +7,6 @@
   <a href="https://shuake.cornna.xyz">shuake.cornna.xyz</a>
 </p>
 
-<p align="center">
-  <img src="docs/university-helper-promo.gif" alt="University Helper 产品宣传片：你睡觉时，它在超星学习通和智慧树上替你签到、刷课、答题，天亮前做完" width="640" />
-  <br />
-  <sub><b>「你睡觉，它上课」</b> 60 秒产品宣传片，用 Remotion 逐帧渲染。</sub>
-</p>
-
 University Helper 是一个校园辅助项目，后端用 FastAPI，前端用 React。仓库名是 `university-helper`，但部分源码目录还沿用旧的内部名称 `easy_learning`。
 
 ## 快速开始

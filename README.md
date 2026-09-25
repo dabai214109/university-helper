@@ -21,12 +21,6 @@
   <a href="https://shuake.cornna.xyz">shuake.cornna.xyz</a>
 </p>
 
-<p align="center">
-  <img src="docs/university-helper-promo.gif" alt="University Helper product film: while you sleep, it signs in, watches lectures and answers quizzes on Chaoxing and Zhihuishu, finishing by dawn" width="640" />
-  <br />
-  <sub><b>"You sleep, it studies."</b> A 60-second product film, rendered frame by frame with Remotion.</sub>
-</p>
-
 University Helper is a campus helper with a FastAPI backend and a React
 frontend. The repository is called `university-helper`, but some container
 names and env-var prefixes still use the old internal name `easy_learning`.

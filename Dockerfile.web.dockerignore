@@ -15,10 +15,8 @@ docs/
 *.md
 LICENSE
 
-# Desktop, marketing, and local build output are not used by this image.
+# Desktop and local build output are not used by this image.
 frontend/src-tauri/target/
-promo/
-site/
 build/
 
 # Node build artifacts — the image runs `npm ci && npm run build` itself.
