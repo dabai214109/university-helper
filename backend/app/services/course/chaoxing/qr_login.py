@@ -70,10 +70,14 @@ class ChaoxingQrLoginError(RuntimeError):
 
 
 def _domain_rank(domain: str) -> int:
-    """Higher is broader. ``.chaoxing.com`` outranks ``passport2.chaoxing.com``."""
+    """Higher is broader. ``.chaoxing.com`` outranks ``passport2.chaoxing.com``.
+
+    A domain-less cookie (what ``jar.update({...})`` produces) ranks lowest: it
+    carries no host scope, so it must never displace a real one.
+    """
     text = str(domain or "").lstrip(".").strip()
     if not text:
-        return 0
+        return -1000
     return -text.count(".")
 
 
