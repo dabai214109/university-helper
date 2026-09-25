@@ -1,16 +1,21 @@
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { BookOpen, CheckCircle, GraduationCap, LayoutGrid, LogOut } from 'lucide-react'
+import { BookOpen, CheckCircle, GraduationCap, LayoutGrid, LogOut, ShieldCheck } from 'lucide-react'
 import { removeToken } from '../utils/auth'
 import { useRuntimeProfile } from './runtimeProfileContext'
 import ThemeToggle from './ThemeToggle'
 import UpdateNotice from './UpdateNotice'
 
-const NAV = [
+const BASE_NAV = [
   { to: '/dashboard', label: '工作台', shortLabel: '总览', icon: LayoutGrid },
   { to: '/chaoxing-signin', label: '学习通签到', shortLabel: '签到', icon: CheckCircle },
   { to: '/chaoxing-fanya', label: '学习通泛雅', shortLabel: '泛雅', icon: BookOpen },
   { to: '/zhihuishu-panel', label: '智慧树', shortLabel: '智慧树', icon: GraduationCap },
 ]
+
+// The admin console only exists in server mode (the desktop build has no
+// users table and never mounts /api/v1/admin), so its entry is appended only
+// when running against a server profile.
+const ADMIN_NAV = { to: '/admin', label: '管理面板', shortLabel: '管理', icon: ShieldCheck }
 
 const desktopLinkClass = ({ isActive }) =>
   `inline-flex min-h-[42px] items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-semibold ${
@@ -23,6 +28,9 @@ export default function AppLayout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { isLocal } = useRuntimeProfile()
+
+  const NAV = isLocal ? BASE_NAV : [...BASE_NAV, ADMIN_NAV]
+  const mobileGridClass = NAV.length > 4 ? 'grid-cols-5' : 'grid-cols-4'
 
   const handleLogout = () => {
     if (window.confirm('确定要退出学道吗？')) {
@@ -86,7 +94,7 @@ export default function AppLayout() {
         </div>
 
         <nav className="border-t border-border-subtle px-2 py-1.5 md:hidden" aria-label="服务切换">
-          <div className="mx-auto grid max-w-lg grid-cols-4 gap-1">
+          <div className={`mx-auto grid max-w-lg ${mobileGridClass} gap-1`}>
             {NAV.map(({ to, label, shortLabel, icon: Icon }) => {
               const active = location.pathname === to
               return (

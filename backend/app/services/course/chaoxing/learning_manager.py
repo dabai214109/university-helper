@@ -1,8 +1,9 @@
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -122,6 +123,7 @@ class ChaoxingLearningManager:
         self._lock = threading.Lock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self._loaded_task_users: set[str] = set()
+        self._last_full_restore_ts = 0.0
         self._restore_tasks_from_store()
 
     def start_task(self, user_id: str, payload: dict[str, Any]) -> str:
@@ -132,6 +134,8 @@ class ChaoxingLearningManager:
         validate_tiku_config((payload or {}).get("tiku_config"))
 
         normalized_user_id = str(user_id or "").strip()
+        schedule_start_at = (payload or {}).get("start_at")
+        is_scheduled = isinstance(schedule_start_at, str) and schedule_start_at.strip()
         with self._lock:
             cleanup_task_records(self._tasks)
             if any(
@@ -147,32 +151,75 @@ class ChaoxingLearningManager:
             pause_event.set()
             stop_event = threading.Event()
             now = _utc_now_iso()
-            task_state: dict[str, Any] = {
-                "task_id": task_id,
-                "user_id": user_id,
-                "platform": "chaoxing",
-                "status": "pending",
-                "message": "Task created",
-                "current_task": "preparing",
-                "progress": {
-                    "total": 0,
-                    "completed": 0,
-                    "failed": 0,
-                    "current": 0,
-                    "total_chapters": 0,
-                    "completed_chapters": 0,
-                    "current_course": "",
-                    "current_chapter": "",
-                    "video_progress": None,
-                },
-                "created_at": now,
-                "started_at": now,
-                "updated_at": now,
-                "logs": [],
-                "_log_cursor": 0,
-                "_pause_event": pause_event,
-                "_stop_event": stop_event,
+            base_progress = {
+                "total": 0,
+                "completed": 0,
+                "failed": 0,
+                "current": 0,
+                "total_chapters": 0,
+                "completed_chapters": 0,
+                "current_course": "",
+                "current_chapter": "",
+                "video_progress": None,
             }
+            if is_scheduled:
+                schedule_dict: dict[str, Any] = {
+                    "start_at": schedule_start_at,
+                    "stop_at": (payload or {}).get("stop_at"),
+                    "start_jitter_min": int((payload or {}).get("start_jitter_min", 0) or 0),
+                    "stop_jitter_min": int((payload or {}).get("stop_jitter_min", 0) or 0),
+                    "fire_at": None,
+                    "actual_stop_at": None,
+                }
+                credentials_dict: dict[str, Any] = {
+                    "username": (payload or {}).get("username", ""),
+                    "password": (payload or {}).get("password", ""),
+                    "tiku_config": (payload or {}).get("tiku_config") or {},
+                }
+                schedule_args_dict: dict[str, Any] = {
+                    "platform": (payload or {}).get("platform"),
+                    "course_ids": (payload or {}).get("course_ids") or [],
+                    "speed": (payload or {}).get("speed"),
+                    "concurrency": (payload or {}).get("concurrency"),
+                    "unopened_strategy": (payload or {}).get("unopened_strategy"),
+                    "notify_config": (payload or {}).get("notify_config") or {},
+                }
+                task_state: dict[str, Any] = {
+                    "task_id": task_id,
+                    "user_id": user_id,
+                    "platform": "chaoxing",
+                    "status": "scheduled",
+                    "message": "Scheduled, waiting for dispatch",
+                    "current_task": "scheduled",
+                    "progress": base_progress,
+                    "created_at": now,
+                    "started_at": now,
+                    "updated_at": now,
+                    "logs": [],
+                    "_log_cursor": 0,
+                    "_pause_event": pause_event,
+                    "_stop_event": stop_event,
+                    "schedule": schedule_dict,
+                    "credentials": credentials_dict,
+                    "schedule_args": schedule_args_dict,
+                }
+            else:
+                task_state: dict[str, Any] = {
+                    "task_id": task_id,
+                    "user_id": user_id,
+                    "platform": "chaoxing",
+                    "status": "pending",
+                    "message": "Task created",
+                    "current_task": "preparing",
+                    "progress": base_progress,
+                    "created_at": now,
+                    "started_at": now,
+                    "updated_at": now,
+                    "logs": [],
+                    "_log_cursor": 0,
+                    "_pause_event": pause_event,
+                    "_stop_event": stop_event,
+                }
             self._tasks[task_id] = task_state
             cleanup_task_records(self._tasks)
             persist_request = self._prepare_persist_locked(task_state)
@@ -185,6 +232,8 @@ class ChaoxingLearningManager:
                 self._record_admission_persist_failure(task_id)
                 raise
 
+        if is_scheduled:
+            return task_id
         try:
             threading.Thread(
                 target=self._run_task_worker_guarded,
@@ -203,14 +252,14 @@ class ChaoxingLearningManager:
             cleanup_task_records(self._tasks)
             task = self._tasks.get(normalized_task_id)
             if task and str(task.get("user_id")) == normalized_user_id:
-                return {k: v for k, v in task.items() if not k.startswith("_")}
+                return self._public_view(task)
 
         self._load_task_from_store(normalized_user_id, normalized_task_id)
         with self._lock:
             task = self._tasks.get(normalized_task_id)
             if not task or str(task.get("user_id")) != normalized_user_id:
                 return None
-            return {k: v for k, v in task.items() if not k.startswith("_")}
+            return self._public_view(task)
 
     def list_tasks(self, user_id: str) -> list[dict[str, Any]]:
         self._ensure_tasks_loaded_for_user(user_id)
@@ -220,7 +269,7 @@ class ChaoxingLearningManager:
             for task in self._tasks.values():
                 if str(task.get("user_id")) != str(user_id):
                     continue
-                public_task = self._task_public_payload(task)
+                public_task = self._public_view(task)
                 public_task.pop("user_id", None)
                 started_at = (
                     public_task.get("started_at") or public_task.get("start_time") or public_task.get("created_at")
@@ -276,6 +325,12 @@ class ChaoxingLearningManager:
                 return {"status": "error", "message": "Task not found"}
             if task.get("status") in {"completed", "failed", "error", "cancelled"}:
                 return {"status": task.get("status", "completed"), "message": "Task already finished"}
+            if task.get("status") == "scheduled":
+                return {
+                    "status": "error",
+                    "message": "Scheduled task: use stop or reschedule",
+                    "code": "invalid_status",
+                }
             pause_event: threading.Event = task["_pause_event"]
             pause_event.clear()
             task["status"] = "paused"
@@ -320,20 +375,288 @@ class ChaoxingLearningManager:
                 task = None
         if task is None:
             self._load_task_from_store(normalized_user_id, normalized_task_id)
+        persist_request = None
+        is_scheduled_cancel = False
         with self._lock:
             task = self._tasks.get(normalized_task_id)
             if not task or str(task.get("user_id")) != normalized_user_id:
                 return {"status": "error", "message": "Task not found"}
-            stop_event: threading.Event = task["_stop_event"]
-            pause_event: threading.Event = task["_pause_event"]
-            stop_event.set()
-            pause_event.set()
-            if task.get("status") not in {"completed", "failed", "error", "cancelled"}:
-                task["status"] = "cancelling"
-                task["message"] = "Task cancellation requested"
-            task["updated_at"] = _utc_now_iso()
+            if task.get("status") in {"completed", "failed", "error", "cancelled"}:
+                return {"status": task.get("status", "completed"), "message": "Task already finished"}
+            if task.get("status") == "scheduled":
+                task["status"] = "cancelled"
+                task["message"] = "Scheduled task cancelled"
+                task["updated_at"] = _utc_now_iso()
+                persist_request = self._prepare_persist_locked(task)
+                is_scheduled_cancel = True
+            else:
+                stop_event: threading.Event = task["_stop_event"]
+                pause_event: threading.Event = task["_pause_event"]
+                stop_event.set()
+                pause_event.set()
+                if task.get("status") not in {"completed", "failed", "error", "cancelled"}:
+                    task["status"] = "cancelling"
+                    task["message"] = "Task cancellation requested"
+                task["updated_at"] = _utc_now_iso()
+                persist_request = self._prepare_persist_locked(task)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+        if is_scheduled_cancel:
+            self._append_task_log(task_id, "Scheduled task cancelled", "warning")
+            return {"status": "cancelled", "message": "Scheduled task cancelled"}
         self._append_task_log(task_id, "Task cancellation requested", "warning")
         return {"status": "cancelling", "message": "Task cancellation requested"}
+
+    def reschedule_task(
+        self,
+        user_id: str,
+        task_id: str,
+        start_at_iso: str,
+        stop_at_iso: str | None = None,
+        start_jitter: int = 0,
+        stop_jitter: int = 0,
+    ) -> dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_task_id = str(task_id or "").strip()
+        with self._lock:
+            task = self._tasks.get(normalized_task_id)
+            if task and str(task.get("user_id")) == normalized_user_id:
+                pass
+            else:
+                task = None
+        if task is None:
+            self._load_task_from_store(normalized_user_id, normalized_task_id)
+        with self._lock:
+            task = self._tasks.get(normalized_task_id)
+            if not task or str(task.get("user_id")) != normalized_user_id:
+                return {"status": "error", "message": "Task not found", "code": "not_found"}
+            if task.get("status") != "scheduled":
+                return {
+                    "status": "error",
+                    "message": "Only scheduled tasks can be rescheduled",
+                    "code": "invalid_status",
+                }
+            schedule = task.get("schedule")
+            if not isinstance(schedule, dict):
+                schedule = {}
+            schedule["start_at"] = str(start_at_iso)
+            if stop_at_iso is not None:
+                schedule["stop_at"] = stop_at_iso
+            else:
+                schedule.pop("stop_at", None)
+            schedule["start_jitter_min"] = max(0, min(int(start_jitter or 0), 720))
+            schedule["stop_jitter_min"] = max(0, min(int(stop_jitter or 0), 720))
+            schedule["fire_at"] = None
+            schedule["actual_stop_at"] = None
+            task["schedule"] = schedule
+            task["message"] = "Scheduled task rescheduled"
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+        self._append_task_log(task_id, "Task rescheduled", "info")
+        return {"status": "scheduled", "message": "Task rescheduled"}
+
+    def start_now_task(self, user_id: str, task_id: str) -> dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_task_id = str(task_id or "").strip()
+        with self._lock:
+            task = self._tasks.get(normalized_task_id)
+            if task and str(task.get("user_id")) == normalized_user_id:
+                pass
+            else:
+                task = None
+        if task is None:
+            self._load_task_from_store(normalized_user_id, normalized_task_id)
+        with self._lock:
+            task = self._tasks.get(normalized_task_id)
+            if not task or str(task.get("user_id")) != normalized_user_id:
+                return {"status": "error", "message": "Task not found", "code": "not_found"}
+            if task.get("status") != "scheduled":
+                return {
+                    "status": "error",
+                    "message": "Only scheduled tasks can be started now",
+                    "code": "invalid_status",
+                }
+            schedule = task.get("schedule")
+            if not isinstance(schedule, dict):
+                schedule = {}
+            schedule["fire_at"] = _utc_now_iso()
+            task["schedule"] = schedule
+            task["message"] = "Scheduled task starting now"
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+        self._append_task_log(task_id, "Task start-now requested", "info")
+        return {"status": "scheduled", "message": "Task will start immediately"}
+
+    def dispatch_scheduled_tasks(self) -> None:
+        """Scan & fire scheduled tasks, auto-pause at stop_at — called every 15s.
+
+        Lock-held scan:
+          1. scheduled+fire_at=None → resolve jitter, set fire_at.
+          2. scheduled+fire_at<=now → rebuild payload, status→pending, collect for worker start.
+          3. (running|pending)+actual_stop_at<=now → pause via event clear.
+          4. Every 60s: full restore from store to recover from restart gaps.
+
+        IMPORTANT: _append_task_log acquires self._lock, so we must NOT call it
+        while holding the lock. Instead we collect log entries and write them
+        after the lock is released.
+        """
+        pending_logs: list[tuple[str, str, str]] = []  # (task_id, message, level)
+        to_fire: list[tuple[str, str, dict[str, Any]]] = []
+        to_persist: list[tuple[dict[str, Any], _TaskPersistSequencer, int]] = []
+        should_restore = False
+
+        with self._lock:
+            cleanup_task_records(self._tasks)
+            restore_key = "_last_full_restore_ts"
+            now_ts = time.time()
+            if now_ts - float(getattr(self, restore_key, 0) or 0) >= 60:
+                should_restore = True
+                setattr(self, restore_key, now_ts)
+
+            for task in self._tasks.values():
+                status = str(task.get("status") or "").lower()
+                schedule = task.get("schedule")
+                if not isinstance(schedule, dict):
+                    continue
+
+                task_id = str(task.get("task_id") or "")
+                uid = str(task.get("user_id") or "")
+
+                if status == "scheduled":
+                    if schedule.get("fire_at") is None:
+                        try:
+                            start_dt = datetime.fromisoformat(
+                                str(schedule["start_at"]).strip().replace("Z", "+00:00")
+                            )
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=UTC)
+                            jitter_min = max(0, int(schedule.get("start_jitter_min", 0) or 0))
+                            jitter_s = random.uniform(-jitter_min * 60, jitter_min * 60)
+                            fire_dt = start_dt + timedelta(seconds=jitter_s)
+                            schedule["fire_at"] = fire_dt.isoformat()
+                        except (ValueError, TypeError, OverflowError):
+                            schedule["fire_at"] = _utc_now_iso()
+
+                    try:
+                        fire_dt = datetime.fromisoformat(
+                            str(schedule["fire_at"]).replace("Z", "+00:00")
+                        )
+                        if fire_dt.tzinfo is None:
+                            fire_dt = fire_dt.replace(tzinfo=UTC)
+                    except (ValueError, TypeError, OverflowError):
+                        fire_dt = datetime.now(UTC)
+
+                    if fire_dt <= datetime.now(UTC):
+                        stop_at_raw = schedule.get("stop_at")
+                        actual_stop = None
+                        if stop_at_raw and str(stop_at_raw).strip():
+                            try:
+                                stop_dt = datetime.fromisoformat(
+                                    str(stop_at_raw).strip().replace("Z", "+00:00")
+                                )
+                                if stop_dt.tzinfo is None:
+                                    stop_dt = stop_dt.replace(tzinfo=UTC)
+                                stop_jitter = max(0, int(schedule.get("stop_jitter_min", 0) or 0))
+                                jitter_s2 = random.uniform(-stop_jitter * 60, stop_jitter * 60)
+                                actual_stop = max(
+                                    stop_dt + timedelta(seconds=jitter_s2),
+                                    datetime.now(UTC) + timedelta(seconds=60),
+                                )
+                            except (ValueError, TypeError, OverflowError):
+                                pass
+                        schedule["actual_stop_at"] = (
+                            actual_stop.isoformat() if actual_stop else None
+                        )
+
+                        task["status"] = "pending"
+                        task["message"] = "Scheduled task starting"
+                        task["updated_at"] = _utc_now_iso()
+                        pending_logs.append((task_id, f"Scheduled task fired at {_utc_now_iso()}", "info"))
+
+                        creds = task.get("credentials")
+                        if not isinstance(creds, dict) or not creds.get("username") or not creds.get("password"):
+                            # Mark failed without calling _fail_task (which tries to lock)
+                            task["status"] = "failed"
+                            task["message"] = "Scheduled task cannot start after restart: missing credentials"
+                            task["current_task"] = "failed"
+                            task["updated_at"] = _utc_now_iso()
+                            pending_logs.append(
+                                (task_id, "Scheduled task cannot start after restart: missing credentials", "error")
+                            )
+                            pr = self._prepare_persist_locked(task)
+                            if pr:
+                                to_persist.append(pr)
+                            continue
+
+                        sched_args = task.get("schedule_args")
+                        if not isinstance(sched_args, dict):
+                            sched_args = {}
+                        payload = dict(sched_args)
+                        payload.update(creds)
+                        to_fire.append((task_id, uid, payload))
+                        pr = self._prepare_persist_locked(task)
+                        if pr:
+                            to_persist.append(pr)
+                        continue
+
+                if status in ("running", "pending"):
+                    actual_stop_raw = schedule.get("actual_stop_at")
+                    if actual_stop_raw and str(actual_stop_raw).strip():
+                        try:
+                            actual_stop_dt = datetime.fromisoformat(
+                                str(actual_stop_raw).strip().replace("Z", "+00:00")
+                            )
+                            if actual_stop_dt.tzinfo is None:
+                                actual_stop_dt = actual_stop_dt.replace(tzinfo=UTC)
+                            if actual_stop_dt <= datetime.now(UTC):
+                                pause_event = task.get("_pause_event")
+                                if isinstance(pause_event, threading.Event):
+                                    pause_event.clear()
+                                task["status"] = "paused"
+                                task["message"] = "Stopped by schedule (stop_at reached)"
+                                task["updated_at"] = _utc_now_iso()
+                                pending_logs.append(
+                                    (task_id, "Auto-paused by schedule stop_at", "info")
+                                )
+                                pr = self._prepare_persist_locked(task)
+                                if pr:
+                                    to_persist.append(pr)
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+
+            # Persist inside the lock since these are reserved snapshots
+            for pr in to_persist:
+                try:
+                    self._persist_task_state(*pr)
+                except Exception:
+                    logger.warning("dispatch persist failed")
+
+        # Lock-free: write logs
+        for log_task_id, log_msg, log_level in pending_logs:
+            self._append_task_log(log_task_id, log_msg, log_level)
+
+        # Lock-free: start worker threads
+        for task_id, uid, payload in to_fire:
+            try:
+                threading.Thread(
+                    target=self._run_task_worker_guarded,
+                    args=(task_id, uid, payload),
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                self._fail_task(task_id, THREAD_START_FAILURE_MESSAGE)
+                logger.exception("dispatch: failed to start worker for %s: %s", task_id, exc)
+
+        # Periodic full restore
+        if should_restore:
+            try:
+                self._restore_tasks_from_store()
+            except Exception:
+                logger.exception("dispatch: periodic restore failed")
 
     def _run_task_worker(self, task_id: str, user_id: str, payload: dict[str, Any]) -> None:
         username = str(payload.get("username") or "").strip()
@@ -797,6 +1120,15 @@ class ChaoxingLearningManager:
         return {k: v for k, v in task.items() if not str(k).startswith("_")}
 
     @staticmethod
+    def _public_view(task: dict[str, Any]) -> dict[str, Any]:
+        """Return API-safe view: drop private keys, credentials, and schedule_args."""
+        return {
+            k: v
+            for k, v in task.items()
+            if not str(k).startswith("_") and k not in ("credentials", "schedule_args")
+        }
+
+    @staticmethod
     def _default_progress() -> dict[str, Any]:
         return {
             "total": 0,
@@ -948,6 +1280,9 @@ class ChaoxingLearningManager:
             )
             if len(task["logs"]) > 1000:
                 del task["logs"][:-1000]
+        else:
+            # "scheduled" tasks survive restart: restore their pause/stop events.
+            pass
 
         pause_event = threading.Event()
         pause_event.set()

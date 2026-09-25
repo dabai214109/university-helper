@@ -19,6 +19,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const ChaoxingSignin = lazy(() => import('./pages/ChaoxingSignin'))
 const ChaoxingFanya = lazy(() => import('./pages/ChaoxingFanya'))
 const Zhihuishu = lazy(() => import('./pages/Zhihuishu'))
+const Admin = lazy(() => import('./pages/Admin'))
 const NotFound = lazy(() => import('./pages/NotFound'))
 
 function RuntimeRoutes() {
@@ -49,6 +50,7 @@ function RuntimeRoutes() {
             <Route path="/chaoxing-signin" element={<ChaoxingSignin />} />
             <Route path="/chaoxing-fanya" element={<ChaoxingFanya />} />
             <Route path="/zhihuishu-panel" element={<Zhihuishu />} />
+            <Route path="/admin" element={<Admin />} />
           </Route>
           <Route path="/" element={<Navigate to={home} replace />} />
           <Route path="*" element={<NotFound />} />

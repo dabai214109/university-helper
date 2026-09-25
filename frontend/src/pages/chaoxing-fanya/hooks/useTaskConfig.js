@@ -41,6 +41,13 @@ export default function useTaskConfig() {
 
   const [notifyUrl, setNotifyUrl] = useState('')
 
+  // Scheduling fields
+  const [scheduleMode, setScheduleMode] = useState('now')
+  const [scheduleStartAt, setScheduleStartAt] = useState('')
+  const [scheduleStopAt, setScheduleStopAt] = useState('')
+  const [startJitterMin, setStartJitterMin] = useState(10)
+  const [stopJitterMin, setStopJitterMin] = useState(15)
+
 
   return {
     speed, setSpeed,
@@ -54,6 +61,11 @@ export default function useTaskConfig() {
     submitMode, setSubmitMode,
     notifyService, setNotifyService,
     notifyUrl, setNotifyUrl,
+    scheduleMode, setScheduleMode,
+    scheduleStartAt, setScheduleStartAt,
+    scheduleStopAt, setScheduleStopAt,
+    startJitterMin, setStartJitterMin,
+    stopJitterMin, setStopJitterMin,
   }
 
 

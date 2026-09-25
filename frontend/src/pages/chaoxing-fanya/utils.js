@@ -7,7 +7,7 @@ export const POLL_MS = 2500
 export const DONE_STATUSES = new Set(['completed', 'failed', 'error', 'cancelled'])
 
 
-export const RESTORE_STATUSES = new Set(['running', 'pending', 'paused'])
+export const RESTORE_STATUSES = new Set(['running', 'pending', 'paused', 'scheduled'])
 
 
 export const CARD = 'rounded-2xl border border-border/20 bg-surface/80 p-6 shadow-lg backdrop-blur-lg'

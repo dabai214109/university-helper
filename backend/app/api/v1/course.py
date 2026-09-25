@@ -3,11 +3,12 @@ import base64
 import logging
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.dependencies import get_current_user
 from app.services.course.chaoxing.course_portal_service import chaoxing_course_portal_service
@@ -55,6 +56,51 @@ class CourseStartRequest(BaseModel):
     unopened_strategy: str = "retry"
     tiku_config: dict | None = None
     notify_config: dict | None = None
+    start_at: str | None = None
+    stop_at: str | None = None
+    start_jitter_min: int = 0
+    stop_jitter_min: int = 0
+
+    @field_validator("start_jitter_min", "stop_jitter_min", mode="before")
+    @classmethod
+    def _clamp_jitter(cls, value: object) -> int:
+        v = int(value or 0)
+        return max(0, min(v, 720))
+
+    @model_validator(mode="after")
+    def _validate_schedule(self) -> "CourseStartRequest":
+        start_at = (self.start_at or "").strip()
+        stop_at = (self.stop_at or "").strip()
+        if not start_at and not stop_at:
+            return self
+        if not start_at and stop_at:
+            raise ValueError("stop_at requires start_at")
+
+        def _parse(dt_str: str) -> datetime:
+            s = dt_str.strip().replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(s)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+
+        try:
+            start_dt = _parse(start_at)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid start_at: {exc}") from exc
+
+        # start_at ≥ now - 60s (allow slight clock skew)
+        if start_dt < datetime.now(timezone.utc).replace(tzinfo=timezone.utc) - timedelta(seconds=60):
+            raise ValueError("start_at must be in the future (or within 60s ago)")
+
+        if stop_at:
+            try:
+                stop_dt = _parse(stop_at)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"Invalid stop_at: {exc}") from exc
+            if stop_dt <= start_dt:
+                raise ValueError("stop_at must be after start_at")
+
+        return self
 
 
 class CourseStatusResponse(BaseModel):
@@ -63,6 +109,7 @@ class CourseStatusResponse(BaseModel):
     progress: dict | None = None
     task_id: str | None = None
     current_task: str | None = None
+    schedule: dict | None = None
 
 
 class ZhihuishuQRLoginResponse(BaseModel):
@@ -114,6 +161,19 @@ class ZhihuishuConfigUpdateRequest(BaseModel):
     auto_answer: bool | None = None
     proxies: dict[str, Any] | None = None
     ai_config: dict[str, Any] | None = None
+
+
+class RescheduleRequest(BaseModel):
+    start_at: str
+    stop_at: str | None = None
+    start_jitter_min: int = 0
+    stop_jitter_min: int = 0
+
+    @field_validator("start_jitter_min", "stop_jitter_min", mode="before")
+    @classmethod
+    def _clamp_jitter(cls, value: object) -> int:
+        v = int(value or 0)
+        return max(0, min(v, 720))
 
 
 def _internal_error(message: str, exc: Exception) -> HTTPException:
@@ -180,21 +240,30 @@ async def start_course_learning(
 
     try:
         learning_manager = _get_learning_manager()
+        payload: dict[str, Any] = {
+            "platform": request.platform,
+            "username": request.username,
+            "password": request.password,
+            "course_ids": request.course_ids or [],
+            "speed": request.speed,
+            "concurrency": request.concurrency,
+            "unopened_strategy": request.unopened_strategy,
+            "tiku_config": request.tiku_config or {},
+            "notify_config": request.notify_config or {},
+        }
+        is_scheduled = bool((request.start_at or "").strip())
+        if is_scheduled:
+            payload["start_at"] = request.start_at
+            payload["stop_at"] = request.stop_at
+            payload["start_jitter_min"] = request.start_jitter_min
+            payload["stop_jitter_min"] = request.stop_jitter_min
         task_id = await _run_blocking(
             learning_manager.start_task,
             user_id=user_id,
-            payload={
-                "platform": request.platform,
-                "username": request.username,
-                "password": request.password,
-                "course_ids": request.course_ids or [],
-                "speed": request.speed,
-                "concurrency": request.concurrency,
-                "unopened_strategy": request.unopened_strategy,
-                "tiku_config": request.tiku_config or {},
-                "notify_config": request.notify_config or {},
-            },
+            payload=payload,
         )
+        if is_scheduled:
+            return await get_course_status(task_id=task_id, current_user=current_user)
         progress = {
             "total": len(request.course_ids or []),
             "completed": 0,
@@ -236,6 +305,7 @@ async def get_course_status(task_id: str, current_user: dict = Depends(get_curre
             progress=chaoxing_task.get("progress"),
             task_id=task_id,
             current_task=chaoxing_task.get("current_task"),
+            schedule=chaoxing_task.get("schedule"),
         )
 
     task = _get_course_task(task_id)
@@ -304,6 +374,9 @@ async def pause_course_task(task_id: str, current_user: dict = Depends(get_curre
     learning_manager = _get_learning_manager()
     result = await _run_blocking(learning_manager.pause_task, user_id=user_id, task_id=task_id)
     if result.get("status") == "error":
+        code = result.get("code", "not_found")
+        if code == "invalid_status":
+            raise HTTPException(status_code=409, detail=result.get("message", "Cannot pause this task"))
         raise HTTPException(status_code=404, detail=result.get("message", "Task not found"))
     return {"status": "success", "message": result.get("message", "Task paused"), "data": result}
 
@@ -324,8 +397,51 @@ async def stop_course_task(task_id: str, current_user: dict = Depends(get_curren
     learning_manager = _get_learning_manager()
     result = await _run_blocking(learning_manager.stop_task, user_id=user_id, task_id=task_id)
     if result.get("status") == "error":
+        code = result.get("code", "not_found")
+        if code == "invalid_status":
+            raise HTTPException(status_code=409, detail=result.get("message", "Cannot stop this task"))
         raise HTTPException(status_code=404, detail=result.get("message", "Task not found"))
     return {"status": "success", "message": result.get("message", "Task cancellation requested"), "data": result}
+
+
+@router.post("/task/{task_id}/reschedule")
+async def reschedule_course_task(
+    task_id: str,
+    request: RescheduleRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = _current_user_id(current_user)
+    learning_manager = _get_learning_manager()
+    result = await _run_blocking(
+        learning_manager.reschedule_task,
+        user_id=user_id,
+        task_id=task_id,
+        start_at_iso=request.start_at,
+        stop_at_iso=request.stop_at,
+        start_jitter=request.start_jitter_min,
+        stop_jitter=request.stop_jitter_min,
+    )
+    if result.get("status") == "error":
+        code = result.get("code", "not_found")
+        status_code = 404 if code == "not_found" else 409
+        raise HTTPException(status_code=status_code, detail=result.get("message", "Failed to reschedule"))
+    return {"status": "success", "message": result.get("message", "Task rescheduled"), "data": result}
+
+
+@router.post("/task/{task_id}/start-now")
+async def start_now_course_task(task_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = _current_user_id(current_user)
+    learning_manager = _get_learning_manager()
+    result = await _run_blocking(
+        learning_manager.start_now_task,
+        user_id=user_id,
+        task_id=task_id,
+    )
+    if result.get("status") == "error":
+        code = result.get("code", "not_found")
+        status_code = 404 if code == "not_found" else 409
+        raise HTTPException(status_code=status_code, detail=result.get("message", "Failed to start now"))
+    return {"status": "success", "message": result.get("message", "Task starting immediately"), "data": result}
 
 
 def cleanup_expired_entries() -> None:

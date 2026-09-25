@@ -478,7 +478,7 @@ export default function useTaskExecution({ callApi, setError, setNotice, pollRef
   const controlTask = useCallback(
 
 
-    async (action) => {
+    async (action, extraBody = null) => {
 
 
       if (!taskId) return
@@ -507,7 +507,17 @@ export default function useTaskExecution({ callApi, setError, setNotice, pollRef
       try {
 
 
-        const resp = await callApi(`/course/task/${targetId}/${action}`, { method: 'POST' })
+        let resp
+        if (action === 'reschedule' && extraBody) {
+          resp = await callApi(`/course/task/${targetId}/reschedule`, {
+            method: 'POST',
+            body: JSON.stringify(extraBody),
+          })
+        } else if (action === 'start-now') {
+          resp = await callApi(`/course/task/${targetId}/start-now`, { method: 'POST' })
+        } else {
+          resp = await callApi(`/course/task/${targetId}/${action}`, { method: 'POST' })
+        }
 
 
         if (!resp || !isCurrentTask(generation, targetId)) return

@@ -130,6 +130,23 @@ export default function ChaoxingFanya() {
       return
     }
 
+    // Validate schedule inputs
+    const isSchedule = taskConfig.scheduleMode === 'scheduled'
+    if (isSchedule) {
+      if (!taskConfig.scheduleStartAt) {
+        auth.setError('请选择定时启动时间。')
+        return
+      }
+      if (taskConfig.scheduleStopAt) {
+        const start = new Date(taskConfig.scheduleStartAt).getTime()
+        const stop = new Date(taskConfig.scheduleStopAt).getTime()
+        if (stop <= start) {
+          auth.setError('停止时间必须晚于启动时间。')
+          return
+        }
+      }
+    }
+
 
     taskExec.setLoading(true)
     taskExec.setLogs([])
@@ -138,44 +155,54 @@ export default function ChaoxingFanya() {
 
 
     try {
+      const body = {
+        platform: 'chaoxing',
+        username: auth.username.trim(),
+        password: auth.password,
+        course_ids: validSelectedCourses,
+        speed: taskConfig.speed,
+        concurrency: taskConfig.concurrency,
+        unopened_strategy: taskConfig.unopenedStrategy,
+        tiku_config: {
+          provider: (Array.isArray(taskConfig.tikuProvider)
+            ? taskConfig.tikuProvider
+            : [taskConfig.tikuProvider]
+          ).join(','),
+          token: taskConfig.tikuToken.trim(),
+          coverage_threshold: taskConfig.coverageThreshold,
+          judge_mapping: {
+            correct: taskConfig.correctOptions
+              .split(',')
+              .map((item) => item.trim())
+              .filter(Boolean),
+            wrong: taskConfig.wrongOptions
+              .split(',')
+              .map((item) => item.trim())
+              .filter(Boolean)
+          },
+          submit_mode: taskConfig.submitMode
+        },
+        notify_config:
+          taskConfig.notifyService.trim() && taskConfig.notifyUrl.trim()
+            ? {
+                service: taskConfig.notifyService.trim(),
+                url: taskConfig.notifyUrl.trim()
+              }
+            : {}
+      }
+
+      if (isSchedule) {
+        body.start_at = new Date(taskConfig.scheduleStartAt).toISOString()
+        if (taskConfig.scheduleStopAt) {
+          body.stop_at = new Date(taskConfig.scheduleStopAt).toISOString()
+        }
+        body.start_jitter_min = taskConfig.startJitterMin
+        body.stop_jitter_min = taskConfig.stopJitterMin
+      }
+
       const resp = await auth.callApi('/course/start', {
         method: 'POST',
-        body: JSON.stringify({
-          platform: 'chaoxing',
-          username: auth.username.trim(),
-          password: auth.password,
-          course_ids: validSelectedCourses,
-          speed: taskConfig.speed,
-          concurrency: taskConfig.concurrency,
-          unopened_strategy: taskConfig.unopenedStrategy,
-          tiku_config: {
-            // Ordered providers → comma-separated `provider` (单题库 or 回退链).
-            provider: (Array.isArray(taskConfig.tikuProvider)
-              ? taskConfig.tikuProvider
-              : [taskConfig.tikuProvider]
-            ).join(','),
-            token: taskConfig.tikuToken.trim(),
-            coverage_threshold: taskConfig.coverageThreshold,
-            judge_mapping: {
-              correct: taskConfig.correctOptions
-                .split(',')
-                .map((item) => item.trim())
-                .filter(Boolean),
-              wrong: taskConfig.wrongOptions
-                .split(',')
-                .map((item) => item.trim())
-                .filter(Boolean)
-            },
-            submit_mode: taskConfig.submitMode
-          },
-          notify_config:
-            taskConfig.notifyService.trim() && taskConfig.notifyUrl.trim()
-              ? {
-                  service: taskConfig.notifyService.trim(),
-                  url: taskConfig.notifyUrl.trim()
-                }
-              : {}
-        })
+        body: JSON.stringify(body),
       })
 
 
@@ -197,7 +224,14 @@ export default function ChaoxingFanya() {
           true
         )
       )
-      taskExec.appendLogs([{ timestamp: new Date().toISOString(), level: 'success', message: `任务已创建：${resp.task_id}` }])
+      const resultStatus = String(resp.status || '').toLowerCase()
+      const startMsg = resultStatus === 'scheduled'
+        ? `定时任务已创建：${resp.task_id}（计划 ${new Date(taskConfig.scheduleStartAt).toLocaleString('zh-CN', { hour12: false })} 启动）`
+        : `任务已创建：${resp.task_id}`
+      taskExec.appendLogs([{ timestamp: new Date().toISOString(), level: 'success', message: startMsg }])
+      if (resultStatus === 'scheduled') {
+        toast.success('已加入定时队列')
+      }
     } catch (err) {
       auth.setError(err?.message || '启动任务失败。')
     } finally {
@@ -208,6 +242,7 @@ export default function ChaoxingFanya() {
     taskExec,
     taskConfig,
     selectedCourses,
+    toast,
   ])
 
 

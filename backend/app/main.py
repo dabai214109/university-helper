@@ -27,6 +27,7 @@ from app.storage.factory import get_storage
 
 logger = logging.getLogger(__name__)
 _CLEANUP_INTERVAL_SECONDS = 60
+_SCHEDULE_DISPATCH_INTERVAL_SECONDS = 15
 _STRICT_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
 _LOCAL_SPA_CSP = "; ".join(
     [
@@ -77,6 +78,19 @@ async def _periodic_cleanup_loop() -> None:
         await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
 
 
+async def _periodic_schedule_dispatch_loop() -> None:
+    """Fire scheduled tasks and auto-stop running tasks at their stop time."""
+    # Defer import to avoid circular dependency at module level.
+    from app.services.course.chaoxing.learning_manager import learning_manager as _lm
+
+    while True:
+        try:
+            await asyncio.to_thread(_lm.dispatch_scheduled_tasks)
+        except Exception:
+            logger.exception("schedule_dispatch iteration failed")
+        await asyncio.sleep(_SCHEDULE_DISPATCH_INTERVAL_SECONDS)
+
+
 def _db_bootstrap_enabled() -> bool:
     return settings.PROFILE != "local" and settings.STORAGE_BACKEND == "postgres" and settings.DB_AUTO_BOOTSTRAP
 
@@ -122,6 +136,7 @@ async def lifespan(app: FastAPI):
     # Opt-in OTel tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set.
     configure_tracing(app)
     app.state.cleanup_task = asyncio.create_task(_periodic_cleanup_loop())
+    app.state.schedule_dispatch_task = asyncio.create_task(_periodic_schedule_dispatch_loop())
     bootstrap_stop = threading.Event()
     app.state.db_bootstrap_task = None
     if _db_bootstrap_enabled():
@@ -144,6 +159,7 @@ async def lifespan(app: FastAPI):
     finally:
         bootstrap_stop.set()
         await _cancel_task(getattr(app.state, "cleanup_task", None))
+        await _cancel_task(getattr(app.state, "schedule_dispatch_task", None))
         await _cancel_task(getattr(app.state, "db_bootstrap_task", None))
         await _cancel_task(getattr(app.state, "update_check_task", None))
         cancel_all_qr_sessions()
@@ -335,9 +351,10 @@ app.include_router(metrics_router, tags=["metrics"])
 
 if settings.PROFILE != "local":
     # Update notices for server administrators; the desktop app updates itself.
-    from app.api.v1 import system
+    from app.api.v1 import system, admin
 
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
 
 
 # PROFILE=local: inject the implicit single-user identity so the HTTPBearer

@@ -16,6 +16,8 @@ _SENSITIVE_FIELDS: tuple[str, ...] = (
     "password",
     "user_password",
     "third_party_password",
+    "token",
+    "api_key",
 )
 # Nested containers that may hold credentials. We recurse one level into them.
 _SENSITIVE_CONTAINERS: tuple[str, ...] = ("credentials",)
@@ -41,12 +43,20 @@ def _encrypt_sensitive(payload: dict[str, Any]) -> dict[str, Any]:
         nested = encrypted.get(container)
         if isinstance(nested, dict):
             try:
-                encrypted[container] = encrypt_dict_fields(nested, _SENSITIVE_FIELDS)
+                cleaned = encrypt_dict_fields(nested, _SENSITIVE_FIELDS)
+                inner = cleaned.get("tiku_config")
+                if isinstance(inner, dict):
+                    cleaned["tiku_config"] = encrypt_dict_fields(inner, _SENSITIVE_FIELDS)
+                encrypted[container] = cleaned
             except Exception:
                 logger.exception("task_store: encrypt nested container=%s failed", container)
                 cleaned = dict(nested)
                 for field in _SENSITIVE_FIELDS:
                     cleaned.pop(field, None)
+                inner = cleaned.get("tiku_config")
+                if isinstance(inner, dict):
+                    for field in _SENSITIVE_FIELDS:
+                        inner.pop(field, None)
                 encrypted[container] = cleaned
     return encrypted
 
@@ -68,9 +78,20 @@ def _decrypt_sensitive(payload: dict[str, Any]) -> dict[str, Any]:
         nested = decrypted.get(container)
         if isinstance(nested, dict):
             try:
-                decrypted[container] = decrypt_dict_fields(nested, _SENSITIVE_FIELDS)
+                cleaned = decrypt_dict_fields(nested, _SENSITIVE_FIELDS)
+                inner = cleaned.get("tiku_config")
+                if isinstance(inner, dict):
+                    cleaned["tiku_config"] = decrypt_dict_fields(inner, _SENSITIVE_FIELDS)
+                decrypted[container] = cleaned
             except Exception:
                 logger.exception("task_store: decrypt nested container=%s failed", container)
+                cleaned = dict(nested)
+                inner = cleaned.get("tiku_config")
+                if isinstance(inner, dict):
+                    try:
+                        cleaned["tiku_config"] = decrypt_dict_fields(inner, _SENSITIVE_FIELDS)
+                    except Exception:
+                        logger.exception("task_store: decrypt tiku_config failed", container)
     return decrypted
 
 

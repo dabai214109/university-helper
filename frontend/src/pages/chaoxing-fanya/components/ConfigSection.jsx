@@ -132,6 +132,16 @@ export default function ConfigSection({
   setNotifyService,
   notifyUrl,
   setNotifyUrl,
+  scheduleMode,
+  setScheduleMode,
+  scheduleStartAt,
+  setScheduleStartAt,
+  scheduleStopAt,
+  setScheduleStopAt,
+  startJitterMin,
+  setStartJitterMin,
+  stopJitterMin,
+  setStopJitterMin,
 }) {
   return (
     <section className={`${CARD} space-y-6`}>
@@ -183,6 +193,102 @@ export default function ConfigSection({
           value={submitMode}
           onChange={setSubmitMode}
         />
+      </div>
+
+      {/* Scheduling section */}
+      <div className="rounded-xl border border-border bg-surface-hover/60 p-4">
+        <p className="mb-3 text-sm font-medium text-text/80">执行方式</p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            aria-pressed={scheduleMode === 'now'}
+            onClick={() => setScheduleMode('now')}
+            className={`flex flex-col items-start rounded-xl border px-4 py-2 text-sm font-medium transition-all duration-200 cursor-pointer ${
+              scheduleMode === 'now'
+                ? 'border-transparent bg-primary text-white shadow-md'
+                : 'border-border bg-surface text-text/70 hover:border-border hover:bg-surface-hover'
+            }`}
+          >
+            立即执行（默认）
+          </button>
+          <button
+            type="button"
+            aria-pressed={scheduleMode === 'scheduled'}
+            onClick={() => setScheduleMode('scheduled')}
+            className={`flex flex-col items-start rounded-xl border px-4 py-2 text-sm font-medium transition-all duration-200 cursor-pointer ${
+              scheduleMode === 'scheduled'
+                ? 'border-transparent bg-primary text-white shadow-md'
+                : 'border-border bg-surface text-text/70 hover:border-border hover:bg-surface-hover'
+            }`}
+          >
+            定时启动
+          </button>
+        </div>
+
+        {scheduleMode === 'scheduled' && (
+          <div className="mt-4 space-y-4 border-t border-border pt-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label htmlFor="fanya-start-at" className="mb-1 block text-sm font-medium text-text/80">
+                  启动时间 <span className="text-xs text-primary">*必填</span>
+                </label>
+                <input
+                  id="fanya-start-at"
+                  type="datetime-local"
+                  className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                  value={scheduleStartAt}
+                  onChange={(event) => setScheduleStartAt(event.target.value)}
+                />
+              </div>
+              <div>
+                <label htmlFor="fanya-stop-at" className="mb-1 block text-sm font-medium text-text/80">
+                  停止时间（可选）
+                </label>
+                <input
+                  id="fanya-stop-at"
+                  type="datetime-local"
+                  className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                  value={scheduleStopAt}
+                  onChange={(event) => setScheduleStopAt(event.target.value)}
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label htmlFor="fanya-start-jitter" className="text-sm font-medium text-text/80">
+                  启动波动：±{startJitterMin} 分钟
+                </label>
+                <input
+                  id="fanya-start-jitter"
+                  type="range"
+                  min="0"
+                  max="120"
+                  step="1"
+                  value={startJitterMin}
+                  onChange={(event) => setStartJitterMin(toNum(event.target.value, 10))}
+                  className="w-full"
+                />
+                <p className="text-xs text-text-muted">在此时间范围内随机启动，避免固定时间特征。</p>
+              </div>
+              <div className="space-y-2">
+                <label htmlFor="fanya-stop-jitter" className="text-sm font-medium text-text/80">
+                  停止波动：±{stopJitterMin} 分钟
+                </label>
+                <input
+                  id="fanya-stop-jitter"
+                  type="range"
+                  min="0"
+                  max="120"
+                  step="1"
+                  value={stopJitterMin}
+                  onChange={(event) => setStopJitterMin(toNum(event.target.value, 15))}
+                  className="w-full"
+                />
+                <p className="text-xs text-text-muted">在此时间范围内随机停止，避免固定时间特征。</p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Answer-source & advanced settings — collapsed by default */}

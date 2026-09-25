@@ -7,7 +7,7 @@ from collections.abc import Mapping, MutableMapping
 from datetime import UTC, datetime
 from typing import Any
 
-ACTIVE_TASK_STATUSES = frozenset({"running", "pending", "paused", "cancelling", "stopping"})
+ACTIVE_TASK_STATUSES = frozenset({"running", "pending", "paused", "cancelling", "stopping", "scheduled"})
 TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "cancelled", "error"})
 
 # These limits apply to each manager's in-memory task registry.  They are
