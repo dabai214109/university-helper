@@ -56,6 +56,10 @@ FORK_MARKERS = (
     ('backend/app/api/v1/admin.py', 'admin_overview'),
     ('frontend/src/pages/Admin.jsx', 'admin/overview'),
     ('backend/app/services/course/task_store.py', 'api_key'),
+    # QR login. `cloudscanlogin` is the upstream Chaoxing endpoint name, so a
+    # file containing it can only be this fork's scanner.
+    ('backend/app/services/course/chaoxing/qr_login.py', 'cloudscanlogin'),
+    ('frontend/src/pages/chaoxing-shared/useChaoxingQrLogin.js', 'qr-login'),
 )
 
 
