@@ -15,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from ..task_store import task_store
+from .cookie_vault import chaoxing_cookie_vault
 from .task_admission import (
     MAX_ACTIVE_TASKS,
     TaskAlreadyActiveError,
@@ -261,6 +262,54 @@ class ChaoxingSigninClient:
             return resp.json()
         except Exception:
             return {}
+
+    def login_with_cookies(self, cookies: dict[str, str]) -> dict[str, Any]:
+        """Adopt an externally obtained cookie jar (e.g. from QR login).
+
+        Chaoxing's ``_uid`` cookie is necessary but not sufficient, so one
+        authenticated call decides whether the jar is actually live — the same
+        rule ``ChaoxingAuthService._validate_cookie_session`` applies.
+        """
+        if not isinstance(cookies, dict) or not cookies:
+            return {"status": False, "message": "Cookie jar is empty"}
+
+        self.session.cookies.clear()
+        self.session.cookies.update({str(k): str(v) for k, v in cookies.items()})
+
+        if not self.uid:
+            return {"status": False, "message": "Cookie jar has no uid"}
+
+        try:
+            probe = self.session.post(
+                COURSE_LIST_URL,
+                headers={"Referer": COURSE_LIST_REFERER},
+                data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
+                timeout=12,
+            )
+        except requests.RequestException as exc:
+            return {"status": False, "message": f"Cookie validation request failed: {exc}"}
+
+        if probe.status_code != 200:
+            self.session.cookies.clear()
+            return {"status": False, "message": f"cookies 校验失败（HTTP {probe.status_code}）"}
+
+        body = probe.text
+        if "passport2.chaoxing.com" in body or "login" in body.lower():
+            self.session.cookies.clear()
+            return {"status": False, "message": "cookies 已失效，请重新扫码登录"}
+
+        # The account name is cosmetic; a markup change must not fail a session
+        # that the probe above already proved is live.
+        self.account_name = self._fetch_account_name() or self.username
+        return {
+            "status": True,
+            "message": "Login successful",
+            "data": {
+                "uid": self.uid,
+                "fid": self.fid,
+                "name": self.account_name,
+            },
+        }
 
     def login(self, username: str, password: str) -> dict[str, Any]:
         self.username = username
@@ -1227,6 +1276,49 @@ class ChaoxingSigninManager:
                 self._clients[user_id] = client
         return result
 
+    def login_with_cookie_jar(self, user_id: str, cookies: dict[str, str]) -> dict[str, Any]:
+        """Log a user in from a cookie jar captured by QR scan."""
+        client = ChaoxingSigninClient()
+        result = client.login_with_cookies(cookies)
+        if result.get("status"):
+            with self._lock:
+                self._clients[user_id] = client
+        return result
+
+    def has_client(self, user_id: str) -> bool:
+        return self._get_client(user_id) is not None
+
+    def logout(self, user_id: str) -> None:
+        with self._lock:
+            self._clients.pop(str(user_id or "").strip(), None)
+
+    def ensure_login(self, user_id: str, username: str, password: str = "") -> dict[str, Any]:
+        """Log in, falling back to a QR-scanned cookie jar when no password is given.
+
+        Callers may supply only a username (or nothing at all) when the user
+        authenticated by scanning a QR code. A supplied password still wins and
+        forces a fresh login, preserving the previous behaviour for
+        password-authenticated users.
+        """
+        if username and password:
+            return self.login(user_id, username, password)
+
+        existing = self._get_client(user_id)
+        if existing is not None and existing.uid:
+            return {"status": True, "message": "Already logged in"}
+
+        cookies = chaoxing_cookie_vault.get(user_id)
+        if cookies:
+            result = self.login_with_cookie_jar(user_id, cookies)
+            if result.get("status"):
+                return result
+            chaoxing_cookie_vault.clear(user_id)
+
+        return {
+            "status": False,
+            "message": "登录态已失效，请重新扫码或使用账号密码登录",
+        }
+
     def _get_client(self, user_id: str) -> ChaoxingSigninClient | None:
         with self._lock:
             return self._clients.get(user_id)
@@ -1400,7 +1492,7 @@ class ChaoxingSigninManager:
         course_id: str | None = None,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        login_result = self.login(user_id, username, password)
+        login_result = self.ensure_login(user_id, username, password)
         if not login_result.get("status"):
             return login_result
 
@@ -1449,7 +1541,7 @@ class ChaoxingSigninManager:
         if not normalized_class_id:
             return {"status": False, "message": "class_id is required", "data": []}
 
-        login_result = self.login(user_id, username, password)
+        login_result = self.ensure_login(user_id, username, password)
         if not login_result.get("status"):
             return login_result
 
@@ -1638,7 +1730,7 @@ class ChaoxingSigninManager:
             "code": payload.get("code"),
         }
 
-        login_result = self.login(user_id, username, password)
+        login_result = self.ensure_login(user_id, username, password)
         if not login_result.get("status"):
             self._update_task(
                 task_id,

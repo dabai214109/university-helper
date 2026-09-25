@@ -4,6 +4,7 @@ import { useRuntimeProfile } from '../../../components'
 import { isAuthenticated, removeToken } from '../../../utils/auth'
 import { api } from '../../../utils/api'
 import { readLastUsername, saveLastUsername } from '../../../utils/chaoxingCreds'
+import useChaoxingQrLogin from '../../chaoxing-shared/useChaoxingQrLogin'
 import { TOKEN_ERROR } from '../utils'
 
 
@@ -31,6 +32,14 @@ export default function useAuthentication({ stopPolling }) {
 
 
   const [notice, setNotice] = useState('')
+
+
+  // True once a Chaoxing session exists — whether it came from a scanned QR
+  // code or a password. Both make the password optional for starting a task.
+  const [loggedIn, setLoggedIn] = useState(false)
+
+
+  const [nickname, setNickname] = useState('')
 
 
   const mountedRef = useRef(true)
@@ -171,6 +180,38 @@ export default function useAuthentication({ stopPolling }) {
   }, [callApi])
 
 
+  const refreshLoginStatus = useCallback(async () => {
+    try {
+      const resp = await callApi('/chaoxing/login-status')
+      if (!mountedRef.current) return false
+      const data = resp?.data || {}
+      const nextLoggedIn = Boolean(data.logged_in)
+      setLoggedIn(nextLoggedIn)
+      setNickname(String(data.nickname || ''))
+      return nextLoggedIn
+    } catch {
+      // Status is advisory; a failure must not surface as a page error.
+      return false
+    }
+  }, [callApi])
+
+
+  // Called once a QR scan is confirmed: the backend now holds the session, so
+  // the page only needs to pull the course list.
+  const handleQrSuccess = useCallback(async () => {
+    setLoggedIn(true)
+    setError('')
+    setNotice('')
+    await refreshLoginStatus()
+    await loadCourses()
+  }, [loadCourses, refreshLoginStatus])
+
+
+  // `callApi(endpoint, options)` already matches the shared hook's
+  // `request(path, options)` contract, so it is passed through directly.
+  const qrLogin = useChaoxingQrLogin({ request: callApi, onSuccess: handleQrSuccess })
+
+
   const handleLogin = useCallback(
 
 
@@ -228,6 +269,7 @@ export default function useAuthentication({ stopPolling }) {
 
         setUsername(loginUsername)
         setPassword(loginPassword)
+        setLoggedIn(true)
         await loadCourses()
 
 
@@ -266,6 +308,10 @@ export default function useAuthentication({ stopPolling }) {
     callApi,
     handleLogin,
     loadCourses,
+    loggedIn,
+    nickname,
+    refreshLoginStatus,
+    qrLogin,
   }
 
 

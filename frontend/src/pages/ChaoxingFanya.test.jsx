@@ -12,6 +12,9 @@ const mocks = vi.hoisted(() => ({
     setError: vi.fn(),
     setNotice: vi.fn(),
     loadCourses: vi.fn(),
+    // The page probes for a live Chaoxing session on mount; report "not
+    // logged in" so these tests exercise the login-card path.
+    refreshLoginStatus: vi.fn().mockResolvedValue(false),
   },
   toast: { error: vi.fn(), success: vi.fn() },
 }))

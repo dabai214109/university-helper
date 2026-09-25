@@ -48,6 +48,9 @@ import useAutoSignin from './chaoxing-signin/hooks/useAutoSignin'
 import useLocationServices from './chaoxing-signin/hooks/useLocationServices'
 import { fetchWithTimeout } from './chaoxing-signin/request'
 
+import useChaoxingQrLogin from './chaoxing-shared/useChaoxingQrLogin'
+import ChaoxingQrLoginPanel from './chaoxing-shared/ChaoxingQrLoginPanel'
+
 import StatsCards from './chaoxing-signin/components/StatsCards'
 import TasksTab from './chaoxing-signin/components/TasksTab'
 import HistoryTab from './chaoxing-signin/components/HistoryTab'
@@ -80,6 +83,10 @@ export default function ChaoxingSignin() {
   const [resultType, setResultType] = useState('info')
 
   const [activeTab, setActiveTab] = useState('signin')
+
+  // Login method for the signin workspace. QR is the default because it never
+  // asks the user to hand over a password.
+  const [loginMethod, setLoginMethod] = useState('qr')
 
   // In 通用模式(all) the type-specific fields are optional (the backend
   // auto-matches the teacher's type), so they stay collapsed behind this
@@ -373,6 +380,43 @@ export default function ChaoxingSignin() {
     }
   }, [requestChaoxingApi])
 
+  // The QR hook calls `request(path, options)`; this page's helper takes the
+  // body as a positional argument, so adapt rather than duplicate auth logic.
+  const qrRequest = useCallback(
+    (path, options = {}) => requestChaoxingApi(path, null, options),
+    [requestChaoxingApi]
+  )
+
+  const handleQrSuccess = useCallback(async () => {
+    setResultType('success')
+    setResultMessage('学习通扫码登录成功。')
+    await Promise.all([fetchCourses(), fetchClasses()])
+  }, [fetchCourses, fetchClasses])
+
+  const qrLogin = useChaoxingQrLogin({ request: qrRequest, onSuccess: handleQrSuccess })
+
+  // Destructured so the bootstrap effect can depend on the (stable) callback
+  // itself rather than the hook's per-render result object.
+  const { refreshLoginStatus } = qrLogin
+
+  // A QR session satisfies authentication on its own, so the password checks
+  // below must not fire for a user who logged in by scanning.
+  const qrAuthenticated = qrLogin.loggedIn
+
+  // Throws when the page has no usable credentials. Returns the username to
+  // send along (empty for a QR-only session, which the API accepts).
+  const requireCredentials = useCallback(
+    (message = '请输入账号和密码，或使用扫码登录。') => {
+      const username = form.username.trim()
+      if (qrAuthenticated) return username
+      if (!username || !form.password) {
+        throw new Error(message)
+      }
+      return username
+    },
+    [form.username, form.password, qrAuthenticated]
+  )
+
   const buildSigninPayload = useCallback(
     (courseId = null, signTypeOverride = null) => {
       const signType = signTypeOverride || form.signType
@@ -452,11 +496,7 @@ export default function ChaoxingSignin() {
       }
 
       try {
-        const username = form.username.trim()
-
-        if (!username || !form.password) {
-          throw new Error('请输入账号和密码。')
-        }
+        requireCredentials()
 
         const { payload, signType } = buildSigninPayload(courseId, signTypeOverride)
 
@@ -495,8 +535,7 @@ export default function ChaoxingSignin() {
       applySigninAssets,
       buildSigninPayload,
       fetchSigninHistory,
-      form.password,
-      form.username,
+      requireCredentials,
       requestChaoxingApi,
     ]
   )
@@ -508,6 +547,7 @@ export default function ChaoxingSignin() {
     setResultMessage,
     setSigninTasks,
     redirectingRef,
+    qrAuthenticated,
   })
   const {
     autoSignin,
@@ -578,6 +618,8 @@ export default function ChaoxingSignin() {
         fetchSigninHistory(),
 
         fetchBackgroundTaskHistory(),
+
+        refreshLoginStatus(),
       ])
 
       if (cancelled) return
@@ -624,6 +666,7 @@ export default function ChaoxingSignin() {
     fetchSigninHistory,
     fetchBackgroundTaskHistory,
     openBackgroundTask,
+    refreshLoginStatus,
   ])
 
   const courseOptions = useMemo(() => {
@@ -748,11 +791,7 @@ export default function ChaoxingSignin() {
       }
 
       try {
-        const username = form.username.trim()
-
-        if (!username || !form.password) {
-          throw new Error('请输入账号和密码。')
-        }
+        requireCredentials()
 
         if (!classOption?.classId) {
           throw new Error('请选择有效的班级。')
@@ -803,8 +842,7 @@ export default function ChaoxingSignin() {
       applySigninAssets,
       buildSigninPayload,
       fetchSigninHistory,
-      form.password,
-      form.username,
+      requireCredentials,
       requestChaoxingApi,
     ]
   )
@@ -937,10 +975,14 @@ export default function ChaoxingSignin() {
 
     const password = form.password
 
-    if (!username || !password) {
+    // With no password but an active QR session, "verify" just re-checks the
+    // scanned session instead of demanding credentials the user never had.
+    const usingQrSession = !password && qrAuthenticated
+
+    if (!usingQrSession && (!username || !password)) {
       setResultType('error')
 
-      setResultMessage('请输入账号和密码。')
+      setResultMessage('请输入账号和密码，或使用扫码登录。')
 
       return
     }
@@ -955,7 +997,7 @@ export default function ChaoxingSignin() {
 
         password,
 
-        use_cookies: false,
+        use_cookies: usingQrSession,
       })
 
       setResultType('success')
@@ -977,17 +1019,19 @@ export default function ChaoxingSignin() {
   const startSigninTask = async () => {
     if (submitting) return
 
-    const username = form.username.trim()
-
-    const password = form.password
-
-    if (!username || !password) {
+    try {
+      requireCredentials()
+    } catch (err) {
       setResultType('error')
 
-      setResultMessage('请输入账号和密码。')
+      setResultMessage(err.message)
 
       return
     }
+
+    const username = form.username.trim()
+
+    const password = form.password
 
     setSubmitting(true)
 
@@ -1103,17 +1147,19 @@ export default function ChaoxingSignin() {
   const startClassSigninTask = async () => {
     if (submitting) return
 
-    const username = form.username.trim()
-
-    const password = form.password
-
-    if (!username || !password) {
+    try {
+      requireCredentials()
+    } catch (err) {
       setResultType('error')
 
-      setResultMessage('请输入账号和密码。')
+      setResultMessage(err.message)
 
       return
     }
+
+    const username = form.username.trim()
+
+    const password = form.password
 
     setSubmitting(true)
 
@@ -1335,32 +1381,94 @@ export default function ChaoxingSignin() {
                 onRefresh={fetchSigninTasks}
               />
 
-              <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={verifyAccount}>
-                <Input
-                  id="cx-username"
-                  label="账号 / 手机号"
-                  type="text"
-                  name="cx-username"
-                  autoComplete="username"
-                  value={form.username}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, username: event.target.value }))
-                  }
-                  required
-                />
+              {/* Login-method switcher — only the chosen method's inputs show,
+                  so the QR panel and the password form never compete. */}
+              <div
+                role="radiogroup"
+                aria-label="登录方式"
+                className="inline-flex rounded-full border border-border/60 bg-surface/70 p-0.5"
+              >
+                {[
+                  { value: 'qr', label: '扫码登录' },
+                  { value: 'password', label: '账号密码登录' },
+                ].map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={loginMethod === opt.value}
+                    onClick={() => {
+                      if (opt.value === 'password') {
+                        void qrLogin.cancelQrLogin()
+                      }
+                      setLoginMethod(opt.value)
+                    }}
+                    className={`min-h-[40px] cursor-pointer rounded-full px-4 text-sm font-medium transition-colors ${
+                      loginMethod === opt.value
+                        ? 'bg-primary text-white'
+                        : 'text-text/70 hover:bg-surface-hover'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
 
-                <Input
-                  id="cx-password"
-                  label="密码"
-                  type="password"
-                  name="cx-password"
-                  autoComplete="current-password"
-                  value={form.password}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, password: event.target.value }))
-                  }
-                  required
-                />
+              {loginMethod === 'qr' && (
+                <div className={GLASS_PANEL_CLASS}>
+                  <ChaoxingQrLoginPanel
+                    qrCode={qrLogin.qrCode}
+                    qrStatus={qrLogin.qrStatus}
+                    qrMessage={qrLogin.qrMessage}
+                    qrError={qrLogin.qrError}
+                    qrLoading={qrLogin.qrLoading}
+                    nickname={qrLogin.nickname}
+                    onRefresh={() => {
+                      void qrLogin.startQrLogin()
+                    }}
+                    buttonClassName="min-h-[44px] cursor-pointer rounded-xl bg-secondary/90 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                  />
+                  {qrLogin.loggedIn && (
+                    <p className="mt-3 text-sm text-success">
+                      已登录{qrLogin.nickname ? `：${qrLogin.nickname}` : ''}，可直接执行签到。
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={verifyAccount}>
+                {/* Credentials are only collected for the password method; the
+                    rest of the form (sign type, courses, classes) stays usable
+                    either way. */}
+                {loginMethod === 'password' && (
+                  <>
+                    <Input
+                      id="cx-username"
+                      label="账号 / 手机号"
+                      type="text"
+                      name="cx-username"
+                      autoComplete="username"
+                      value={form.username}
+                      onChange={(event) =>
+                        setForm((prev) => ({ ...prev, username: event.target.value }))
+                      }
+                      required
+                    />
+
+                    <Input
+                      id="cx-password"
+                      label="密码"
+                      type="password"
+                      name="cx-password"
+                      autoComplete="current-password"
+                      value={form.password}
+                      onChange={(event) =>
+                        setForm((prev) => ({ ...prev, password: event.target.value }))
+                      }
+                      required
+                    />
+                  </>
+                )}
 
                 <div className="md:col-span-2">
                   <Select
@@ -1728,14 +1836,30 @@ export default function ChaoxingSignin() {
                 )}
 
                 <div className="md:col-span-2 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-                  <Button
-                    type="submit"
-                    variant="secondary"
-                    className="min-h-[44px] min-w-[44px] cursor-pointer transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
-                    disabled={submitting}
-                  >
-                    {submitting ? '验证中...' : '验证账号'}
-                  </Button>
+                  {loginMethod === 'password' ? (
+                    <Button
+                      type="submit"
+                      variant="secondary"
+                      className="min-h-[44px] min-w-[44px] cursor-pointer transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                      disabled={submitting}
+                    >
+                      {submitting ? '验证中...' : '验证账号'}
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="min-h-[44px] min-w-[44px] cursor-pointer transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                      onClick={() => {
+                        void qrLogin.refreshLoginStatus()
+                        void fetchCourses()
+                        void fetchClasses()
+                      }}
+                      disabled={submitting}
+                    >
+                      {qrLogin.loggedIn ? '已扫码登录' : '刷新登录状态'}
+                    </Button>
+                  )}
 
                   <Button
                     type="button"

@@ -48,8 +48,10 @@ THREAD_START_FAILURE_DETAIL = (
 
 class CourseStartRequest(BaseModel):
     platform: str
-    username: str
-    password: str
+    # Optional so a QR-scanned Chaoxing session (cookie jar held server-side)
+    # can start a learning task without the account password.
+    username: str = ""
+    password: str = ""
     course_ids: list[str] | None = None
     speed: float = 1.0
     concurrency: int = 4

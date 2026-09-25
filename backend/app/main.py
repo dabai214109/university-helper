@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import auth, chaoxing
+from app.api.v1.chaoxing import cancel_all_chaoxing_qr_sessions
 from app.api.v1.course import cancel_all_qr_sessions, cleanup_expired_entries
 from app.api.v1.metrics import record_request
 from app.api.v1.metrics import router as metrics_router
@@ -163,6 +164,7 @@ async def lifespan(app: FastAPI):
         await _cancel_task(getattr(app.state, "db_bootstrap_task", None))
         await _cancel_task(getattr(app.state, "update_check_task", None))
         cancel_all_qr_sessions()
+        cancel_all_chaoxing_qr_sessions()
 
 
 app = FastAPI(

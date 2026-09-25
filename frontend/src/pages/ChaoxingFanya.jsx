@@ -26,6 +26,9 @@ export default function ChaoxingFanya() {
   const [chapters, setChapters] = useState({})
   const [expanded, setExpanded] = useState(new Set())
 
+  // QR is the default: it never asks the user to hand over a password.
+  const [loginMethod, setLoginMethod] = useState('qr')
+
 
   // Shared pollRef lives in parent to break circular dependency between hooks.
   // stopPolling is needed by useAuthentication (for auth error handling)
@@ -45,6 +48,24 @@ export default function ChaoxingFanya() {
 
 
   const auth = useAuthentication({ stopPolling })
+
+  // A returning user may still hold a live Chaoxing session (from a QR scan or
+  // an earlier password login). Recover it so they are not asked to log in
+  // again — the courses then decide whether the login card is shown at all.
+  useEffect(() => {
+    let active = true
+    const restoreSession = async () => {
+      const loggedIn = await auth.refreshLoginStatus()
+      if (!active || !loggedIn) return
+      await auth.loadCourses()
+    }
+    void restoreSession()
+    return () => {
+      active = false
+    }
+    // auth.refreshLoginStatus / auth.loadCourses are stable useCallbacks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Keep selections valid when a successful login/refresh replaces the course list.
   // A failed refresh leaves auth.courses untouched, so it does not discard choices.
@@ -121,8 +142,8 @@ export default function ChaoxingFanya() {
     const validSelectedCourses = selectedCourses.filter((courseId) => availableCourseIds.has(courseId))
 
 
-    if (!auth.username.trim() || !auth.password.trim()) {
-      auth.setError('请先填写账号和密码。')
+    if (!auth.loggedIn && (!auth.username.trim() || !auth.password.trim())) {
+      auth.setError('请先扫码登录，或填写账号和密码。')
       return
     }
     if (validSelectedCourses.length === 0) {
@@ -266,6 +287,9 @@ export default function ChaoxingFanya() {
             setPassword={auth.setPassword}
             loginLoading={auth.loginLoading}
             handleLogin={auth.handleLogin}
+            loginMethod={loginMethod}
+            setLoginMethod={setLoginMethod}
+            qrLogin={auth.qrLogin}
           />
         ) : (
           <>

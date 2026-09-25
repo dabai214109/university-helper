@@ -11,6 +11,7 @@ from app.services.notification import NotificationFactory
 from app.services.notification.providers import validate_notification_url
 
 from ..task_store import task_store
+from .cookie_vault import chaoxing_cookie_vault
 from .endpoint_security import validate_tiku_config
 from .learning import ChapterTask, JobProcessor, init_chaoxing
 from .payload_mapper import normalize_tiku_config
@@ -578,14 +579,25 @@ class ChaoxingLearningManager:
                         pending_logs.append((task_id, f"Scheduled task fired at {_utc_now_iso()}", "info"))
 
                         creds = task.get("credentials")
-                        if not isinstance(creds, dict) or not creds.get("username") or not creds.get("password"):
+                        has_password = (
+                            isinstance(creds, dict)
+                            and creds.get("username")
+                            and creds.get("password")
+                        )
+                        # A QR-scanned user has no stored password; their cookie
+                        # jar may still be live in the vault after a restart.
+                        has_qr_session = bool(chaoxing_cookie_vault.get(uid))
+                        if not has_password and not has_qr_session:
                             # Mark failed without calling _fail_task (which tries to lock)
                             task["status"] = "failed"
-                            task["message"] = "Scheduled task cannot start after restart: missing credentials"
+                            task["message"] = (
+                                "Scheduled task cannot start after restart: "
+                                "missing credentials (re-scan the QR code or provide a password)"
+                            )
                             task["current_task"] = "failed"
                             task["updated_at"] = _utc_now_iso()
                             pending_logs.append(
-                                (task_id, "Scheduled task cannot start after restart: missing credentials", "error")
+                                (task_id, task["message"], "error")
                             )
                             pr = self._prepare_persist_locked(task)
                             if pr:
@@ -661,8 +673,17 @@ class ChaoxingLearningManager:
     def _run_task_worker(self, task_id: str, user_id: str, payload: dict[str, Any]) -> None:
         username = str(payload.get("username") or "").strip()
         password = str(payload.get("password") or "").strip()
-        if not username or not password:
-            self._fail_task(task_id, "Missing username or password")
+        # A QR-scanned session lives in the vault, so a password is optional.
+        # The cookie jar is deliberately NOT persisted with the task: it is a
+        # live session credential and the vault is the single source of truth.
+        cookies = payload.get("cookies")
+        if not isinstance(cookies, dict) or not cookies:
+            cookies = chaoxing_cookie_vault.get(user_id) or {}
+        if not (username and password) and not cookies:
+            self._fail_task(
+                task_id,
+                "Missing credentials: sign in with a QR code or provide an account password",
+            )
             return
 
         course_list = payload.get("course_ids") or payload.get("course_list") or []
@@ -683,7 +704,8 @@ class ChaoxingLearningManager:
             "notopen_action": str(payload.get("unopened_strategy") or payload.get("notopen_action") or "retry")
             .strip()
             .lower(),
-            "use_cookies": False,
+            "use_cookies": bool(cookies),
+            "cookies": cookies,
         }
         if common_config["notopen_action"] not in {"retry", "ask", "continue"}:
             common_config["notopen_action"] = "retry"
@@ -712,7 +734,9 @@ class ChaoxingLearningManager:
             return
 
         try:
-            login_state = chaoxing.login(login_with_cookies=False)
+            login_state = chaoxing.login_with_cookie_jar(cookies) if cookies else chaoxing.login(
+                login_with_cookies=False
+            )
         except Exception as exc:
             self._fail_task(task_id, f"Login request failed: {exc}")
             return

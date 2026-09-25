@@ -56,6 +56,25 @@ class ChaoxingAuthService:
         msg = resp_data.get("msg2") or resp_data.get("msg") or resp_data.get("msg1") or "登录失败"
         return {"status": False, "msg": str(msg)}
 
+    def login_with_cookie_jar(self, cookies: dict | None) -> dict:
+        """Log in from an explicit cookie jar (e.g. a QR-scanned session).
+
+        Unlike ``login(login_with_cookies=True)`` this never reads the shared
+        ``cookies.json`` file, so one tenant's jar can never be merged into
+        another's session.
+        """
+        if not isinstance(cookies, dict) or not cookies:
+            return {"status": False, "msg": "cookies 为空，请重新扫码登录"}
+        self.session_manager.set_cookies(cookies)
+        logger.debug("Cookie jar session loaded (cookies redacted)")
+        if not self._validate_cookie_session():
+            logger.warning("扫码 cookie 校验失败")
+            if self.account and self.account.username and self.account.password:
+                return self.login(login_with_cookies=False)
+            return {"status": False, "msg": "cookies 已失效，请重新扫码登录"}
+        logger.info("登录成功...")
+        return {"status": True, "msg": "登录成功"}
+
     def _validate_cookie_session(self) -> bool:
         session = self.session_manager.get_session()
         if not session.cookies.get("_uid"):

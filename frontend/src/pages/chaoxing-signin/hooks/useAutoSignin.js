@@ -7,7 +7,7 @@ import {
   clampCheckInterval,
 } from '../utils'
 
-export default function useAutoSignin(form, executeSignin, requestChaoxingApi, { setResultType, setResultMessage, setSigninTasks, redirectingRef }) {
+export default function useAutoSignin(form, executeSignin, requestChaoxingApi, { setResultType, setResultMessage, setSigninTasks, redirectingRef, qrAuthenticated = false }) {
   const autoCheckRef = useRef(null)
   const countdownRef = useRef(null)
   const autoSignedTaskCacheRef = useRef(new Map())
@@ -90,7 +90,9 @@ export default function useAutoSignin(form, executeSignin, requestChaoxingApi, {
 
     const username = formRef.current.username.trim()
     const password = formRef.current.password
-    if (!username || !password) {
+    // A QR-scanned session needs neither field; only a password-authenticated
+    // user can be missing credentials here.
+    if (!qrAuthenticated && (!username || !password)) {
       setResultType('error')
       setResultMessage('自动签到已开启，但账号或密码为空。')
       return
@@ -150,7 +152,7 @@ export default function useAutoSignin(form, executeSignin, requestChaoxingApi, {
         autoSigningRef.current = null
       }
     }
-  }, [autoSignin, autoSignFilter, requestChaoxingApi, setResultType, setResultMessage, setSigninTasks, redirectingRef])
+  }, [autoSignin, autoSignFilter, requestChaoxingApi, setResultType, setResultMessage, setSigninTasks, redirectingRef, qrAuthenticated])
 
   // Auto-signin cycle + countdown effect
   useEffect(() => {

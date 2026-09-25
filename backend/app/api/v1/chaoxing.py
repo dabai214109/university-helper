@@ -3,14 +3,26 @@ import base64
 import binascii
 import json
 import logging
+import threading
+import time
 from typing import Annotated, Any
+from uuid import uuid4
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field, StringConstraints, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.dependencies import get_current_user_id
+from app.services.course.chaoxing.cookie_vault import chaoxing_cookie_vault
+from app.services.course.chaoxing.qr_login import login_with_qr
 from app.services.course.chaoxing.signin import signin_manager
 from app.services.course.chaoxing.task_admission import TaskAdmissionError
 
@@ -69,8 +81,11 @@ def _decode_photo_base64(value: str) -> bytes:
 
 
 class _ChaoxingCredentials(BaseModel):
-    username: NonBlankShortString
-    password: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    # Password is optional so a QR-login session (cookie jar held server-side)
+    # can drive the sign/start endpoints without one. Endpoints that genuinely
+    # need a password check for it explicitly.
+    username: OptionalShortString = None
+    password: Annotated[str, StringConstraints(max_length=512)] | None = None
 
 
 class _ChaoxingPhotoPayload(_ChaoxingCredentials):
@@ -88,6 +103,14 @@ class _ChaoxingPhotoPayload(_ChaoxingCredentials):
 
 class ChaoxingLoginRequest(_ChaoxingCredentials):
     use_cookies: bool = False
+
+    @model_validator(mode="after")
+    def _require_password_without_cookies(self) -> "ChaoxingLoginRequest":
+        if self.use_cookies:
+            return self
+        if not (self.username or "").strip() or not (self.password or "").strip():
+            raise ValueError("username and password are required")
+        return self
 
 
 class ChaoxingSignRequest(_ChaoxingPhotoPayload):
@@ -345,6 +368,242 @@ async def _run_blocking(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+# ── QR login session registry ─────────────────────────────────────────────────
+# A scan is driven by a background worker that owns the Chaoxing session, so the
+# browser polls this registry instead of holding the connection open. Entries
+# are scoped by user_id: a session id alone must never reveal another tenant's
+# login state.
+
+_QR_SESSION_TTL_SECONDS = 10 * 60
+_qr_sessions: dict[str, dict[str, Any]] = {}
+_qr_sessions_lock = threading.Lock()
+
+
+def _cancel_qr_sessions(session_ids: list[str]) -> None:
+    cancel_events: list[threading.Event] = []
+    with _qr_sessions_lock:
+        for session_id in session_ids:
+            state = _qr_sessions.pop(session_id, None)
+            cancel_event = state.get("cancel_event") if state else None
+            if isinstance(cancel_event, threading.Event):
+                cancel_events.append(cancel_event)
+    for cancel_event in cancel_events:
+        cancel_event.set()
+
+
+def _cancel_qr_sessions_for_user(user_id: str) -> None:
+    with _qr_sessions_lock:
+        session_ids = [
+            session_id
+            for session_id, state in _qr_sessions.items()
+            if str(state.get("user_id")) == user_id
+        ]
+    _cancel_qr_sessions(session_ids)
+
+
+def cancel_all_chaoxing_qr_sessions() -> None:
+    """Cooperatively stop every remaining QR worker during app shutdown."""
+    with _qr_sessions_lock:
+        session_ids = list(_qr_sessions)
+    _cancel_qr_sessions(session_ids)
+
+
+def cleanup_expired_chaoxing_qr_sessions() -> None:
+    now = time.time()
+    with _qr_sessions_lock:
+        expired = [
+            session_id
+            for session_id, state in _qr_sessions.items()
+            if now - float(state.get("updated_at") or now) > _QR_SESSION_TTL_SECONDS
+        ]
+    if expired:
+        _cancel_qr_sessions(expired)
+
+
+@router.post("/qr-login")
+async def chaoxing_qr_login(user_id: str = Depends(get_current_user_id)):
+    """Start a QR login session and return the rendered code."""
+    cleanup_expired_chaoxing_qr_sessions()
+    _cancel_qr_sessions_for_user(user_id)
+
+    session_id = uuid4().hex
+    qr_ready_event = threading.Event()
+    cancel_event = threading.Event()
+    state: dict[str, Any] = {
+        "status": "pending",
+        "message": "请使用学习通 App 扫描二维码",
+        "qr_code": None,
+        "updated_at": time.time(),
+        "user_id": user_id,
+        "cancel_event": cancel_event,
+    }
+    with _qr_sessions_lock:
+        _qr_sessions[session_id] = state
+
+    def qr_callback(img_bytes: bytes) -> None:
+        encoded = base64.b64encode(img_bytes).decode("ascii")
+        with _qr_sessions_lock:
+            current = _qr_sessions.get(session_id)
+            if current is None:
+                return
+            current["qr_code"] = encoded
+            current["updated_at"] = time.time()
+        qr_ready_event.set()
+
+    def status_callback(next_status: str, message: str) -> None:
+        with _qr_sessions_lock:
+            current = _qr_sessions.get(session_id)
+            if current is None:
+                return
+            current["status"] = next_status
+            current["message"] = message
+            current["updated_at"] = time.time()
+
+    def login_worker() -> None:
+        try:
+            result = login_with_qr(
+                qr_callback,
+                cancel_event=cancel_event,
+                status_callback=status_callback,
+            )
+        except Exception as exc:  # pragma: no cover - defensive safety net
+            logger.exception("Chaoxing QR login worker crashed: session=%s", session_id)
+            result = {"success": False, "message": f"二维码登录失败：{exc}"}
+
+        with _qr_sessions_lock:
+            current = _qr_sessions.get(session_id)
+            if current is None:
+                return
+            if result.get("success"):
+                current["status"] = "success"
+                current["message"] = "登录成功"
+            else:
+                current["status"] = "failed"
+                current["message"] = str(result.get("message") or "登录失败")
+            current["updated_at"] = time.time()
+
+        if not result.get("success"):
+            return
+        cookies = result.get("cookies")
+        if not isinstance(cookies, dict) or not cookies:
+            with _qr_sessions_lock:
+                current = _qr_sessions.get(session_id)
+                if current is not None:
+                    current["status"] = "failed"
+                    current["message"] = "扫码成功但未取得登录凭据"
+                    current["updated_at"] = time.time()
+            return
+
+        # Keep the jar in the per-user vault (so later tasks and the learning
+        # manager can re-authenticate) AND materialise the sign-in client now,
+        # so the very next /courses call from the page already sees a session.
+        try:
+            chaoxing_cookie_vault.set(
+                user_id,
+                cookies,
+                nickname=str(result.get("nickname") or ""),
+                uid=str(result.get("uid") or ""),
+            )
+            login_result = signin_manager.login_with_cookie_jar(user_id, cookies)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to establish QR session: session=%s", session_id)
+            login_result = {"status": False, "message": "登录态建立失败，请重试"}
+
+        if login_result.get("status"):
+            return
+        with _qr_sessions_lock:
+            current = _qr_sessions.get(session_id)
+            if current is not None:
+                current["status"] = "failed"
+                current["message"] = str(login_result.get("message") or "登录态建立失败")
+                current["updated_at"] = time.time()
+
+    try:
+        threading.Thread(target=login_worker, daemon=True).start()
+    except Exception as exc:
+        _cancel_qr_sessions([session_id])
+        raise HTTPException(
+            status_code=503,
+            detail="服务器无法创建二维码登录线程，请稍后重试。",
+        ) from exc
+
+    if not await asyncio.to_thread(qr_ready_event.wait, 15):
+        _cancel_qr_sessions([session_id])
+        raise HTTPException(status_code=504, detail="获取学习通二维码超时，请重试")
+
+    with _qr_sessions_lock:
+        current = _qr_sessions.get(session_id)
+        if current is None or not current.get("qr_code"):
+            raise HTTPException(status_code=502, detail="学习通未返回二维码图片")
+        return {
+            "status": True,
+            "message": "ok",
+            "data": {
+                "session_id": session_id,
+                "status": current.get("status", "pending"),
+                "message": current.get("message", ""),
+                "qr_code": current["qr_code"],
+            },
+        }
+
+
+@router.get("/qr-login/{session_id}")
+async def chaoxing_qr_login_status(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    cleanup_expired_chaoxing_qr_sessions()
+    with _qr_sessions_lock:
+        state = _qr_sessions.get(session_id)
+        if state is None or str(state.get("user_id")) != user_id:
+            raise HTTPException(status_code=404, detail="二维码会话不存在或已过期")
+        payload = {
+            "session_id": session_id,
+            "status": state.get("status", "pending"),
+            "message": state.get("message", ""),
+            "qr_code": state.get("qr_code"),
+        }
+    return {"status": True, "message": "ok", "data": payload}
+
+
+@router.post("/qr-login/{session_id}/cancel")
+async def chaoxing_qr_login_cancel(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    with _qr_sessions_lock:
+        state = _qr_sessions.get(session_id)
+        if state is None or str(state.get("user_id")) != user_id:
+            raise HTTPException(status_code=404, detail="二维码会话不存在或已过期")
+    _cancel_qr_sessions([session_id])
+    return {"status": True, "message": "已取消", "data": {}}
+
+
+@router.get("/login-status")
+async def chaoxing_login_status(user_id: str = Depends(get_current_user_id)):
+    """Report whether this user currently has a usable Chaoxing session."""
+    summary = chaoxing_cookie_vault.summary(user_id)
+    has_client = await _run_blocking(signin_manager.has_client, user_id)
+    return {
+        "status": True,
+        "message": "ok",
+        "data": {
+            "logged_in": bool(has_client or summary.get("logged_in")),
+            "nickname": summary.get("nickname", ""),
+            "uid": summary.get("uid", ""),
+            "has_session": bool(has_client),
+        },
+    }
+
+
+@router.post("/logout")
+async def chaoxing_logout(user_id: str = Depends(get_current_user_id)):
+    _cancel_qr_sessions_for_user(user_id)
+    await _run_blocking(signin_manager.logout, user_id)
+    chaoxing_cookie_vault.clear(user_id)
+    return {"status": True, "message": "已退出登录", "data": {}}
+
+
 @router.get("/location/geocode")
 async def chaoxing_location_geocode(
     query: str,
@@ -452,12 +711,22 @@ async def chaoxing_login(
     request: ChaoxingLoginRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    result = await _run_blocking(
-        signin_manager.login,
-        user_id=user_id,
-        username=request.username,
-        password=request.password,
-    )
+    if request.use_cookies:
+        # Reuse a QR-scanned jar if this user has one; otherwise fall back to
+        # the account password they just supplied.
+        result = await _run_blocking(
+            signin_manager.ensure_login,
+            user_id=user_id,
+            username=request.username or "",
+            password=request.password or "",
+        )
+    else:
+        result = await _run_blocking(
+            signin_manager.login,
+            user_id=user_id,
+            username=request.username,
+            password=request.password,
+        )
     if result.get("status"):
         return {
             "status": True,

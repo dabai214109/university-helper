@@ -68,6 +68,10 @@ class Chaoxing:
     def login(self, login_with_cookies=False):
         return self.auth_service.login(login_with_cookies)
 
+    def login_with_cookie_jar(self, cookies):
+        """Log in from a cookie jar captured by QR scan (no password needed)."""
+        return self.auth_service.login_with_cookie_jar(cookies)
+
     def get_fid(self):
         return self.auth_service.get_fid()
 
