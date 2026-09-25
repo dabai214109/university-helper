@@ -1,0 +1,148 @@
+# ============================================================================
+# 测试部署 Compose（自包含：app + web + postgres 全部从本仓库源码构建）
+#
+# 用途：部署本仓库（含「定时任务 + 管理面板」二次开发）到 Docker 做联调测试。
+#
+#   docker compose -p uh-test -f docker-compose.test.yml up -d --build
+#
+# 与官方文件的关系：
+#   - docker-compose.server.yml  只有 app + postgres，没有 web（生产靠宿主机
+#     nginx + newhost.yml 的 web 容器，且要求宿主机先 npm run build）。
+#   - docker-compose.release.yml 拉 GHCR 预构建镜像 —— 那些镜像【不含】本
+#     fork 的改动，因此不能用于本次测试。
+#   - 本文件把 Dockerfile.server(app) 和 Dockerfile.web(前端 nginx) 都从源码
+#     构建，前端在容器内 npm ci && npm run build，宿主机无需装 Node。
+#
+# 重要：app 必须保持 --workers 1（见 Dockerfile.server）。定时调度循环与任务
+# 状态都在进程内，多 worker 会导致调度与状态分裂。
+# ============================================================================
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: university-helper-app:test
+    container_name: uh-test-app
+    restart: unless-stopped
+    # 仅绑定本机回环：外部流量一律走 web 容器。需要直连调试时改 .env 的 APP_PORT。
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    environment:
+      MAIN_DB_HOST: postgres
+      MAIN_DB_NAME: main_db
+      MAIN_DB_USER: easylearning
+      MAIN_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MAIN_DB_PORT: 5432
+      SECRET_KEY: ${SECRET_KEY}
+      SHUAKE_COMPAT_SECRET: ${SHUAKE_COMPAT_SECRET:-}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      # 管理员邮箱（逗号分隔）。留空 = 第一个注册的账号是管理员。
+      # 管理面板 /api/v1/admin/* 与「管理面板」导航入口都依赖它。
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      # 本 fork 不要跟随上游版本提醒，默认关闭。
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-false}
+      # 反代（web 容器 / 宝塔 nginx）负责 TLS，应用自身不要跳转，否则死循环。
+      ENFORCE_HTTPS: "false"
+      ENV: ${ENV:-dev}
+      REDIS_URL: ${REDIS_URL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=3); sys.exit(0)\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    stop_grace_period: 30s
+    networks:
+      - uh-test-net
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        # 国内服务器构建加速；不需要可留空走 npm 官方源。
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    image: university-helper-web:test
+    container_name: uh-test-web
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    # 默认只绑回环，由宝塔 nginx 反代。测试期想直接 http://IP:8080 访问，
+    # 在 .env 里设 HTTP_BIND_HOST=0.0.0.0（见部署指导的安全提示）。
+    ports:
+      - "${HTTP_BIND_HOST:-127.0.0.1}:${HTTP_PORT:-8080}:80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - uh-test-net
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: uh-test-db
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=300"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "effective_cache_size=384MB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "wal_compression=on"
+      - "-c"
+      - "log_min_duration_statement=500ms"
+    environment:
+      POSTGRES_USER: easylearning
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: main_db
+    volumes:
+      # 首次创建数据卷时执行 database/ 下的建表与模板库脚本。
+      # 复用已存在的数据卷不会再执行；缺失时由 app 的 DB_AUTO_BOOTSTRAP 兜底。
+      - uh-test-postgres-data:/var/lib/postgresql/data
+      - ./database:/docker-entrypoint-initdb.d:ro
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-easylearning} -d $${POSTGRES_DB:-main_db}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - uh-test-net
+
+networks:
+  uh-test-net:
+    driver: bridge
+
+volumes:
+  uh-test-postgres-data:
