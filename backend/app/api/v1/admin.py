@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _LEARNING_TASK_KIND = "chaoxing_learning"
 _VALID_TASK_STATUS_FILTERS = frozenset(
-    {"running", "pending", "paused", "cancelling", "stopping", "scheduled",
+    {"running", "pending", "paused", "cancelling", "stopping", "scheduled", "recurring",
      "completed", "failed", "cancelled", "error"}
 )
 # How many recent log lines /admin/events aggregates across tasks.
@@ -283,6 +283,156 @@ async def admin_tasks(
         return {"status": "error", "message": "Failed to load tasks"}
 
     return {"status": "success", "data": tasks}
+
+
+@router.get("/learning-records")
+async def admin_learning_records(
+    user_id: str | None = None,
+    status: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    current_user: dict = Depends(get_current_user),
+):
+    """Per-user learning history for the admin console.
+
+    Deliberately separate from ``/admin/tasks``: that endpoint returns the whole
+    ``payload``, which carries up to 1000 log lines per task (see
+    ``learning_manager._append_task_log``). A history table must not drag those
+    through, so this projects only the fields the table renders and paginates
+    server-side.
+    """
+    await _require_admin(current_user)
+
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
+    offset = (page - 1) * page_size
+
+    normalized_status = (status or "").strip().lower()
+    if normalized_status and normalized_status not in _VALID_TASK_STATUS_FILTERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status filter. Allowed: {', '.join(sorted(_VALID_TASK_STATUS_FILTERS))}",
+        )
+
+    def _parse_bound(raw: str | None, field: str) -> datetime | None:
+        text = (raw or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid {field}: expected an ISO-8601 timestamp",
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    since_dt = _parse_bound(since, "since")
+    until_dt = _parse_bound(until, "until")
+
+    # Filters are shared between the count and the page query.
+    where: list[str] = []
+    params: list[Any] = []
+    if user_id:
+        where.append("t.user_id = %s")
+        params.append(str(user_id))
+    if normalized_status:
+        where.append("LOWER(t.status) = %s")
+        params.append(normalized_status)
+    if since_dt is not None:
+        where.append("COALESCE(t.updated_at, t.started_at, t.created_at) >= %s")
+        params.append(since_dt)
+    if until_dt is not None:
+        where.append("COALESCE(t.updated_at, t.started_at, t.created_at) <= %s")
+        params.append(until_dt)
+
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+    try:
+        with get_db_session() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) AS cnt FROM course_task_store t{where_sql}",
+                params,
+            )
+            row = cur.fetchone()
+            total = int(row["cnt"] or 0) if row else 0
+
+            # Project only the fields the table needs — never the whole payload.
+            cur.execute(
+                "SELECT t.task_id, t.user_id, t.status, t.message,"
+                " t.started_at, t.updated_at,"
+                " t.payload -> 'progress' AS progress,"
+                " t.payload -> 'finished_at' AS finished_at,"
+                " u.username"
+                " FROM course_task_store t"
+                " LEFT JOIN users u ON u.id::text = t.user_id"
+                f"{where_sql}"
+                " ORDER BY t.updated_at DESC NULLS LAST LIMIT %s OFFSET %s",
+                [*params, page_size, offset],
+            )
+            records: list[dict[str, Any]] = []
+            for row in cur.fetchall():
+                row_dict = dict(row)
+                progress = row_dict.get("progress")
+                if not isinstance(progress, dict):
+                    progress = {}
+                courses = progress.get("courses")
+                if not isinstance(courses, list):
+                    courses = []
+
+                def _iso(value: Any) -> str | None:
+                    if isinstance(value, datetime):
+                        return value.isoformat()
+                    if isinstance(value, str):
+                        return value
+                    return None
+
+                records.append(
+                    {
+                        "task_id": row_dict.get("task_id"),
+                        "user_id": row_dict.get("user_id"),
+                        "username": row_dict.get("username"),
+                        "status": row_dict.get("status"),
+                        "message": row_dict.get("message"),
+                        "started_at": _iso(row_dict.get("started_at")),
+                        "finished_at": _iso(row_dict.get("finished_at")),
+                        "updated_at": _iso(row_dict.get("updated_at")),
+                        # Course names come from the queue view; a task created
+                        # before that field existed simply has none.
+                        "course_names": [
+                            str(c.get("name"))
+                            for c in courses
+                            if isinstance(c, dict) and c.get("name")
+                        ],
+                        "courses": courses,
+                        "progress": {
+                            "completed": progress.get("completed", 0),
+                            "total": progress.get("total", 0),
+                            "completed_chapters": progress.get("completed_chapters", 0),
+                            "total_chapters": progress.get("total_chapters", 0),
+                        },
+                    }
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("admin learning-records query failed")
+        return {"status": "error", "message": "Failed to load learning records"}
+
+    return {
+        "status": "success",
+        "data": records,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
 
 
 @router.post("/task/{task_id}/stop")

@@ -52,10 +52,17 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
   )
 
   const [activeCourseId, setActiveCourseId] = useState('')
-  const [activeTab, setActiveTab] = useState('activities')
+  // Accordion: `null` means every panel is collapsed. Storing a single key (not
+  // a set) makes the panels mutually exclusive by construction — opening one
+  // necessarily closes the other.
+  const [activeTab, setActiveTab] = useState(null)
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
+
+  // Tabs are fetched on first expand and then cached per (course, tab), so
+  // collapsing and re-opening a panel is instant instead of a second request.
+  const tabCacheRef = useRef(new Map())
 
   // Out-of-order response guard (F66): every load bumps this token and remembers
   // its (courseId, tabKey). A resolution whose token is stale — because the user
@@ -76,8 +83,28 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
   }, [activeCourseId, courseOptions, preferredCourseId])
 
   const loadTab = useCallback(
-    async (courseId, tabKey) => {
+    async (courseId, tabKey, { force = false } = {}) => {
       if (!courseId || !tabKey) return
+
+      const cacheKey = `${courseId}:${tabKey}`
+      if (!force) {
+        const cached = tabCacheRef.current.get(cacheKey)
+        if (cached) {
+          // Invalidate any in-flight request for a different (course, tab) so a
+          // slow response cannot land on top of this cached render.
+          requestSeqRef.current += 1
+          activeRequestRef.current = {
+            seq: requestSeqRef.current,
+            courseId,
+            tabKey,
+          }
+          setResult(cached)
+          setLoadError('')
+          setLoading(false)
+          return
+        }
+      }
+
       const seq = requestSeqRef.current + 1
       requestSeqRef.current = seq
       activeRequestRef.current = { seq, courseId, tabKey }
@@ -103,12 +130,14 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
         const remoteUrl = safeHref(
           data.url || data.remoteUrl || data.tab?.shellUrl || data.tab?.remoteUrl || ''
         )
-        setResult({
+        const next = {
           tabKey,
           items,
           remoteUrl,
           message: data.message || '',
-        })
+        }
+        tabCacheRef.current.set(cacheKey, next)
+        setResult(next)
         setNotice?.(`已加载学习通「${tabLabel(tabKey)}」：${items.length} 条`)
       } catch (err) {
         if (!isCurrent()) return
@@ -126,14 +155,21 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
     [setError, setNotice]
   )
 
+  // Load only the expanded tab. Collapsed (activeTab === null) fetches nothing,
+  // which is what makes the accordion lazy rather than eager.
   useEffect(() => {
-    if (!activeCourseId) return
+    if (!activeCourseId || !activeTab) return
     void loadTab(activeCourseId, activeTab)
   }, [activeCourseId, activeTab, loadTab])
+
+  const toggleTab = useCallback((tabKey) => {
+    setActiveTab((prev) => (prev === tabKey ? null : tabKey))
+  }, [])
 
   if (courseOptions.length === 0) return null
 
   const items = result?.items || []
+  const isOpen = Boolean(activeTab)
 
   return (
     <section className={CARD}>
@@ -156,18 +192,19 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
             type="button"
             className="inline-flex min-h-[44px] min-w-[44px] cursor-pointer items-center justify-center rounded-lg border border-border px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
             onClick={() => {
-              void loadTab(activeCourseId, activeTab)
+              // Force a refetch of the open panel, bypassing the cache.
+              void loadTab(activeCourseId, activeTab, { force: true })
             }}
-            disabled={loading || !activeCourseId}
+            disabled={loading || !activeCourseId || !activeTab}
             aria-label="刷新学习通课程内容"
-            title="刷新"
+            title={activeTab ? '刷新' : '展开某个标签后可刷新'}
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
           </button>
         </div>
       </div>
 
-      <div className="flex gap-2 overflow-x-auto pb-2">
+      <div className="flex gap-2 overflow-x-auto pb-2" role="tablist" aria-label="学习通课程数据">
         {TABS.map((tab) => {
           const Icon = TAB_ICONS[tab.key] || FileText
           const selected = tab.key === activeTab
@@ -175,12 +212,17 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
             <button
               key={tab.key}
               type="button"
+              role="tab"
+              id={`portal-tab-${tab.key}`}
+              aria-selected={selected}
+              aria-expanded={selected}
+              aria-controls="portal-tab-panel"
               className={[
                 'inline-flex min-h-[44px] min-w-[72px] shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border px-3 text-sm transition-colors',
                 selected ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-surface text-text/70'
               ].join(' ')}
-              onClick={() => setActiveTab(tab.key)}
-              title={tab.label}
+              onClick={() => toggleTab(tab.key)}
+              title={selected ? `收起${tab.label}` : `展开${tab.label}`}
             >
               <Icon className="h-4 w-4" />
               <span>{tab.label}</span>
@@ -189,7 +231,19 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
         })}
       </div>
 
-      <div className="mt-4 rounded-xl border border-border bg-surface p-4">
+      {!isOpen && (
+        <div className="mt-4 rounded-xl border border-dashed border-border/50 bg-surface-hover/40 px-3 py-8 text-center text-sm text-text-muted">
+          点击上方标签查看对应内容（再次点击可收起）
+        </div>
+      )}
+
+      {isOpen && (
+      <div
+        id="portal-tab-panel"
+        role="tabpanel"
+        aria-labelledby={`portal-tab-${activeTab}`}
+        className="mt-4 rounded-xl border border-border bg-surface p-4"
+      >
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <p className="font-semibold text-text">
             {tabLabel(activeTab)}
@@ -259,6 +313,7 @@ export default function CoursePortalSection({ courses, selectedCourses, setError
           </div>
         )}
       </div>
+      )}
     </section>
   )
 }

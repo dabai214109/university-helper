@@ -79,11 +79,14 @@ vi.mock('./chaoxing-fanya/components/ConfigSection', () => ({ default: () => nul
 vi.mock('./chaoxing-fanya/components/TaskHistorySection', () => ({ default: () => null }))
 vi.mock('./chaoxing-fanya/components/LogSection', () => ({ default: () => null }))
 vi.mock('./chaoxing-fanya/components/CourseListSection', () => ({
-  default: ({ selectedCourses, setSelectedCourses }) => (
+  default: ({ selectedCourses, setSelectedCourses, onConfirmQueue }) => (
     <>
       <output data-testid="selected-courses">{selectedCourses.join(',')}</output>
       <button type="button" onClick={() => setSelectedCourses(mocks.selection || ['course-1'])}>
         选择课程
+      </button>
+      <button type="button" onClick={() => onConfirmQueue(selectedCourses)}>
+        确定加入队列
       </button>
       <button
         type="button"
@@ -104,6 +107,8 @@ const selectCourseAndStart = async () => {
   const user = userEvent.setup()
   render(<ChaoxingFanya />)
   await user.click(screen.getByRole('button', { name: '选择课程' }))
+  // Ticking a box only stages the selection; the queue is committed explicitly.
+  await user.click(screen.getByRole('button', { name: '确定加入队列' }))
   const startButton = screen.getByRole('button', { name: '开始刷课' })
   await user.click(startButton)
 }
@@ -177,6 +182,9 @@ describe('ChaoxingFanya start task loading state', () => {
     const user = userEvent.setup()
     render(<ChaoxingFanya />)
     await user.click(screen.getByRole('button', { name: '选择课程' }))
+    // Commit the queue FIRST, so the refresh has to prune an already-confirmed
+    // queue — that is the stronger guarantee (a stale ID must never be sent).
+    await user.click(screen.getByRole('button', { name: '确定加入队列' }))
     await user.click(screen.getByRole('button', { name: '刷新课程' }))
 
     await waitFor(() => expect(screen.getByTestId('selected-courses')).toHaveTextContent(expectedSelection))
@@ -196,6 +204,20 @@ describe('ChaoxingFanya start task loading state', () => {
       await user.click(screen.getByRole('button', { name: '开始刷课' }))
       expect(mocks.auth.callApi).not.toHaveBeenCalledWith('/course/start', expect.anything())
     }
+  })
+
+  test('refuses to start when courses are ticked but the queue was never confirmed', async () => {
+    mocks.auth.courses = [{ courseId: 'course-1' }]
+    mocks.selection = ['course-1']
+    mocks.auth.callApi.mockResolvedValue({ task_id: 'task-x', status: 'pending' })
+
+    const user = userEvent.setup()
+    render(<ChaoxingFanya />)
+    await user.click(screen.getByRole('button', { name: '选择课程' }))
+    await user.click(screen.getByRole('button', { name: '开始刷课' }))
+
+    expect(mocks.auth.setError).toHaveBeenCalledWith('请先点击「确定加入队列」再开始刷课。')
+    expect(mocks.auth.callApi).not.toHaveBeenCalledWith('/course/start', expect.anything())
   })
 
   test('a failed refresh leaves the current selection untouched', async () => {

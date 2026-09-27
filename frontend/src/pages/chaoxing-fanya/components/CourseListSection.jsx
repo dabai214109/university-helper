@@ -4,7 +4,7 @@ import { CARD, getCourseId, getCourseName } from '../utils'
 
 export default function CourseListSection({
   courses, selectedCourses, setSelectedCourses, chapters, expanded,
-  toggleExpand, loadCourses,
+  toggleExpand, loadCourses, queuedCourses = [], onConfirmQueue,
 }) {
 
 
@@ -119,6 +119,26 @@ export default function CourseListSection({
       </div>
 
 
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/40 bg-surface-hover/50 px-3 py-2">
+        <p className="text-sm text-text/80">
+          已勾选 <span className="font-semibold text-primary">{selectedCourses.length}</span> 门课程
+          {queuedCourses.length > 0 && (
+            <span className="ml-2 text-xs text-text-muted">
+              队列中 {queuedCourses.length} 门
+            </span>
+          )}
+        </p>
+        <button
+          type="button"
+          disabled={selectedCourses.length === 0}
+          onClick={() => onConfirmQueue?.(selectedCourses)}
+          className="min-h-[36px] cursor-pointer rounded-lg bg-primary px-4 text-sm font-medium text-white transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-text-muted"
+        >
+          确定加入队列
+        </button>
+      </div>
+
+
       <div className="max-h-80 space-y-2 overflow-y-auto">
 
 
@@ -129,6 +149,8 @@ export default function CourseListSection({
 
 
           const isExpanded = expanded.has(courseId)
+          // 1-based position in the tick order; this is the order the queue runs in.
+          const queuePosition = selectedCourses.indexOf(courseId) + 1
 
 
           return (
@@ -168,6 +190,16 @@ export default function CourseListSection({
 
 
                 />
+
+
+                {queuePosition > 0 && (
+                  <span
+                    aria-label={`队列第 ${queuePosition} 位`}
+                    className="inline-grid h-6 w-6 shrink-0 place-items-center rounded-full bg-primary/15 font-mono text-xs font-semibold text-primary"
+                  >
+                    {queuePosition}
+                  </span>
+                )}
 
 
                 <div className="flex-1">

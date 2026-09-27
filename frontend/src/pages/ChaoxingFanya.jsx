@@ -23,6 +23,10 @@ export default function ChaoxingFanya() {
 
 
   const [selectedCourses, setSelectedCourses] = useState([])
+  // Confirmed queue: the FIFO order the backend will run. Kept separate from
+  // `selectedCourses` so ticking a box afterwards cannot silently reorder a run
+  // the user already committed to.
+  const [queuedCourses, setQueuedCourses] = useState([])
   const [chapters, setChapters] = useState({})
   const [expanded, setExpanded] = useState(new Set())
 
@@ -69,12 +73,16 @@ export default function ChaoxingFanya() {
 
   // Keep selections valid when a successful login/refresh replaces the course list.
   // A failed refresh leaves auth.courses untouched, so it does not discard choices.
+  // The confirmed queue is filtered the same way: a course that disappeared must
+  // not be submitted as a stale ID.
   useEffect(() => {
     const availableCourseIds = new Set(auth.courses.map(getCourseId).filter(Boolean))
-    setSelectedCourses((prev) => {
+    const prune = (prev) => {
       const next = prev.filter((courseId) => availableCourseIds.has(courseId))
       return next.length === prev.length ? prev : next
-    })
+    }
+    setSelectedCourses(prune)
+    setQueuedCourses(prune)
   }, [auth.courses])
 
   // Surface auth errors / notices through the shared toast and immediately
@@ -139,7 +147,8 @@ export default function ChaoxingFanya() {
     auth.setNotice('')
 
     const availableCourseIds = new Set(auth.courses.map(getCourseId).filter(Boolean))
-    const validSelectedCourses = selectedCourses.filter((courseId) => availableCourseIds.has(courseId))
+    // Run the confirmed queue, in the order it was confirmed (FIFO).
+    const validSelectedCourses = queuedCourses.filter((courseId) => availableCourseIds.has(courseId))
 
 
     if (!auth.loggedIn && (!auth.username.trim() || !auth.password.trim())) {
@@ -147,18 +156,28 @@ export default function ChaoxingFanya() {
       return
     }
     if (validSelectedCourses.length === 0) {
-      auth.setError('请至少选择一门课程。')
+      auth.setError(
+        selectedCourses.length > 0
+          ? '请先点击「确定加入队列」再开始刷课。'
+          : '请至少选择一门课程。'
+      )
       return
     }
 
     // Validate schedule inputs
     const isSchedule = taskConfig.scheduleMode === 'scheduled'
+    const isRecurring = isSchedule && taskConfig.repeat !== 'once'
     if (isSchedule) {
-      if (!taskConfig.scheduleStartAt) {
+      if (isRecurring) {
+        if (!taskConfig.timeOfDay) {
+          auth.setError('请选择每天的执行时间。')
+          return
+        }
+      } else if (!taskConfig.scheduleStartAt) {
         auth.setError('请选择定时启动时间。')
         return
       }
-      if (taskConfig.scheduleStopAt) {
+      if (!isRecurring && taskConfig.scheduleStopAt) {
         const start = new Date(taskConfig.scheduleStartAt).getTime()
         const stop = new Date(taskConfig.scheduleStopAt).getTime()
         if (stop <= start) {
@@ -213,12 +232,25 @@ export default function ChaoxingFanya() {
       }
 
       if (isSchedule) {
-        body.start_at = new Date(taskConfig.scheduleStartAt).toISOString()
-        if (taskConfig.scheduleStopAt) {
-          body.stop_at = new Date(taskConfig.scheduleStopAt).toISOString()
-        }
+        body.repeat = taskConfig.repeat || 'once'
         body.start_jitter_min = taskConfig.startJitterMin
         body.stop_jitter_min = taskConfig.stopJitterMin
+        if (isRecurring) {
+          // A recurring run is driven by the wall-clock time; an absolute
+          // start_at is neither sent nor required.
+          body.time_of_day = taskConfig.timeOfDay
+          if (taskConfig.repeat === 'every_other_day' && taskConfig.anchorDate) {
+            body.anchor_date = taskConfig.anchorDate
+          }
+          if (taskConfig.maxDurationMin) {
+            body.max_duration_min = taskConfig.maxDurationMin
+          }
+        } else {
+          body.start_at = new Date(taskConfig.scheduleStartAt).toISOString()
+          if (taskConfig.scheduleStopAt) {
+            body.stop_at = new Date(taskConfig.scheduleStopAt).toISOString()
+          }
+        }
       }
 
       const resp = await auth.callApi('/course/start', {
@@ -246,11 +278,21 @@ export default function ChaoxingFanya() {
         )
       )
       const resultStatus = String(resp.status || '').toLowerCase()
-      const startMsg = resultStatus === 'scheduled'
-        ? `定时任务已创建：${resp.task_id}（计划 ${new Date(taskConfig.scheduleStartAt).toLocaleString('zh-CN', { hour12: false })} 启动）`
-        : `任务已创建：${resp.task_id}`
+      const isRecurringResult = String(resp.schedule?.repeat || 'once') !== 'once'
+      let startMsg
+      if (resultStatus === 'recurring') {
+        startMsg = `周期任务已创建：${resp.task_id}（${taskConfig.repeat === 'daily' ? '每天' : '隔天'} ${taskConfig.timeOfDay}）`
+      } else if (resultStatus === 'scheduled') {
+        startMsg = isRecurringResult
+          ? `周期任务已创建：${resp.task_id}`
+          : `定时任务已创建：${resp.task_id}（计划 ${new Date(taskConfig.scheduleStartAt).toLocaleString('zh-CN', { hour12: false })} 启动）`
+      } else {
+        startMsg = `任务已创建：${resp.task_id}`
+      }
       taskExec.appendLogs([{ timestamp: new Date().toISOString(), level: 'success', message: startMsg }])
-      if (resultStatus === 'scheduled') {
+      if (resultStatus === 'recurring') {
+        toast.success('周期任务已创建，将按设定时间反复执行')
+      } else if (resultStatus === 'scheduled') {
         toast.success('已加入定时队列')
       }
     } catch (err) {
@@ -262,9 +304,23 @@ export default function ChaoxingFanya() {
     auth,
     taskExec,
     taskConfig,
+    queuedCourses,
     selectedCourses,
     toast,
   ])
+
+  const confirmQueue = useCallback(
+    (courseIds) => {
+      const ordered = Array.isArray(courseIds) ? courseIds.filter(Boolean) : []
+      setQueuedCourses(ordered)
+      if (ordered.length === 0) {
+        toast.error('请至少选择一门课程。')
+        return
+      }
+      toast.success(`已加入队列：共 ${ordered.length} 门课程，将按勾选顺序执行`)
+    },
+    [toast]
+  )
 
 
   const statusText = String(taskExec.taskStatus?.status || '').toLowerCase()
@@ -297,6 +353,8 @@ export default function ChaoxingFanya() {
               courses={auth.courses}
               selectedCourses={selectedCourses}
               setSelectedCourses={setSelectedCourses}
+              queuedCourses={queuedCourses}
+              onConfirmQueue={confirmQueue}
               chapters={chapters}
               expanded={expanded}
               toggleExpand={toggleExpand}

@@ -11,6 +11,13 @@ const SUBMIT_MODES = [
   { value: 'save', label: '仅保存' },
 ]
 
+// Execution cadence. `once` keeps the historical one-shot behaviour.
+const REPEAT_MODES = [
+  { value: 'once', label: '仅一次', hint: '指定日期时间执行一次' },
+  { value: 'daily', label: '每天', hint: '每天固定时间执行' },
+  { value: 'every_other_day', label: '隔天', hint: '每隔一天执行' },
+]
+
 const TIKU_PROVIDERS = [
   { value: 'TikuYanxi', label: '言溪题库', hint: '通用题库（需 Token）' },
   { value: 'TikuGo', label: 'GO 题库', hint: '免费搜题源' },
@@ -142,7 +149,18 @@ export default function ConfigSection({
   setStartJitterMin,
   stopJitterMin,
   setStopJitterMin,
+  repeat,
+  setRepeat,
+  timeOfDay,
+  setTimeOfDay,
+  anchorDate,
+  setAnchorDate,
+  maxDurationMin,
+  setMaxDurationMin,
 }) {
+  // Recurring runs are driven by a wall-clock time, not an absolute datetime,
+  // so the one-shot pickers are replaced rather than merely supplemented.
+  const isRecurring = repeat !== 'once'
   return (
     <section className={`${CARD} space-y-6`}>
       {/* Everyday playback settings */}
@@ -227,32 +245,94 @@ export default function ConfigSection({
 
         {scheduleMode === 'scheduled' && (
           <div className="mt-4 space-y-4 border-t border-border pt-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label htmlFor="fanya-start-at" className="mb-1 block text-sm font-medium text-text/80">
-                  启动时间 <span className="text-xs text-primary">*必填</span>
-                </label>
-                <input
-                  id="fanya-start-at"
-                  type="datetime-local"
-                  className="w-full rounded-xl border border-border bg-surface px-4 py-3"
-                  value={scheduleStartAt}
-                  onChange={(event) => setScheduleStartAt(event.target.value)}
-                />
+            <PillGroup
+              label="执行周期"
+              options={REPEAT_MODES}
+              value={repeat}
+              onChange={setRepeat}
+            />
+
+            {isRecurring ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="fanya-time-of-day" className="mb-1 block text-sm font-medium text-text/80">
+                    执行时间 <span className="text-xs text-primary">*必填</span>
+                  </label>
+                  <input
+                    id="fanya-time-of-day"
+                    type="time"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    value={timeOfDay}
+                    onChange={(event) => setTimeOfDay(event.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-text-muted">
+                    按服务器时区解释；当天该时刻已过则从明天开始。
+                  </p>
+                </div>
+                <div>
+                  <label htmlFor="fanya-max-duration" className="mb-1 block text-sm font-medium text-text/80">
+                    单次最长运行（分钟）
+                  </label>
+                  <input
+                    id="fanya-max-duration"
+                    type="number"
+                    min="1"
+                    max="1440"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    value={maxDurationMin}
+                    onChange={(event) => setMaxDurationMin(toNum(event.target.value, 120))}
+                  />
+                  <p className="mt-1 text-xs text-text-muted">
+                    到点自动暂停，避免单次运行时间过长。留空表示不限制。
+                  </p>
+                </div>
+                {repeat === 'every_other_day' && (
+                  <div className="sm:col-span-2">
+                    <label htmlFor="fanya-anchor-date" className="mb-1 block text-sm font-medium text-text/80">
+                      隔天基准日期
+                    </label>
+                    <input
+                      id="fanya-anchor-date"
+                      type="date"
+                      className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                      value={anchorDate}
+                      onChange={(event) => setAnchorDate(event.target.value)}
+                    />
+                    <p className="mt-1 text-xs text-text-muted">
+                      从该日期起每隔一天执行；留空则以今天为基准。
+                    </p>
+                  </div>
+                )}
               </div>
-              <div>
-                <label htmlFor="fanya-stop-at" className="mb-1 block text-sm font-medium text-text/80">
-                  停止时间（可选）
-                </label>
-                <input
-                  id="fanya-stop-at"
-                  type="datetime-local"
-                  className="w-full rounded-xl border border-border bg-surface px-4 py-3"
-                  value={scheduleStopAt}
-                  onChange={(event) => setScheduleStopAt(event.target.value)}
-                />
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="fanya-start-at" className="mb-1 block text-sm font-medium text-text/80">
+                    启动时间 <span className="text-xs text-primary">*必填</span>
+                  </label>
+                  <input
+                    id="fanya-start-at"
+                    type="datetime-local"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    value={scheduleStartAt}
+                    onChange={(event) => setScheduleStartAt(event.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="fanya-stop-at" className="mb-1 block text-sm font-medium text-text/80">
+                    停止时间（可选）
+                  </label>
+                  <input
+                    id="fanya-stop-at"
+                    type="datetime-local"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    value={scheduleStopAt}
+                    onChange={(event) => setScheduleStopAt(event.target.value)}
+                  />
+                </div>
               </div>
-            </div>
+            )}
+
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="fanya-start-jitter" className="text-sm font-medium text-text/80">
@@ -268,7 +348,10 @@ export default function ConfigSection({
                   onChange={(event) => setStartJitterMin(toNum(event.target.value, 10))}
                   className="w-full"
                 />
-                <p className="text-xs text-text-muted">在此时间范围内随机启动，避免固定时间特征。</p>
+                <p className="text-xs text-text-muted">
+                  在此时间范围内随机启动，避免固定时间特征。
+                  {isRecurring && ' 周期任务每次触发都会重新随机。'}
+                </p>
               </div>
               <div className="space-y-2">
                 <label htmlFor="fanya-stop-jitter" className="text-sm font-medium text-text/80">
@@ -287,6 +370,13 @@ export default function ConfigSection({
                 <p className="text-xs text-text-muted">在此时间范围内随机停止，避免固定时间特征。</p>
               </div>
             </div>
+
+            {isRecurring && (
+              <p className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-text/70">
+                周期任务会按设定时间反复执行：每次到点生成一条独立的刷课记录，
+                周期本身长期保留，可在「定时队列」中取消。
+              </p>
+            )}
           </div>
         )}
       </div>

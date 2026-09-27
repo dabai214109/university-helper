@@ -10,6 +10,13 @@ from typing import Any
 ACTIVE_TASK_STATUSES = frozenset({"running", "pending", "paused", "cancelling", "stopping", "scheduled"})
 TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "cancelled", "error"})
 
+# A recurring task is a long-lived *template*, not a unit of work: each due
+# occurrence spawns a separate child task that does the learning. It is
+# deliberately NOT in ACTIVE_TASK_STATUSES — otherwise a single template would
+# occupy the user's one-active-task slot forever and block every other task,
+# and it would also hold a permanent slot against MAX_ACTIVE_TASKS.
+RECURRING_TASK_STATUSES = frozenset({"recurring"})
+
 # These limits apply to each manager's in-memory task registry.  They are
 # deliberately conservative so a burst of users cannot retain an unbounded
 # number of worker records, while still leaving enough room for task history.
@@ -55,6 +62,10 @@ def is_active_status(status: object) -> bool:
 
 def is_terminal_status(status: object) -> bool:
     return str(status or "").strip().lower() in TERMINAL_TASK_STATUSES
+
+
+def is_recurring_status(status: object) -> bool:
+    return str(status or "").strip().lower() in RECURRING_TASK_STATUSES
 
 
 def count_active_tasks(tasks: MutableMapping[str, dict[str, Any]]) -> int:
@@ -144,7 +155,11 @@ def cleanup_task_records(
 
     evictable: list[tuple[float, str]] = []
     for task_id, task in tasks.items():
-        if is_active_status(task.get("status")):
+        status = task.get("status")
+        # Never evict live work OR a recurring template. A template is neither
+        # active nor terminal, so without this check the LRU bound would silently
+        # drop a user's schedule once enough other tasks accumulated.
+        if is_active_status(status) or is_recurring_status(status):
             continue
         timestamp = _task_timestamp(task)
         evictable.append((timestamp if timestamp is not None else float("-inf"), task_id))

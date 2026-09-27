@@ -17,6 +17,13 @@ from app.services.course.chaoxing.endpoint_security import (
     UnsafeEndpointError,
     validate_tiku_config,
 )
+from app.services.course.chaoxing.recurrence import (
+    RecurrenceError,
+    clamp_duration_minutes,
+    normalize_repeat,
+    parse_anchor_date,
+    parse_time_of_day,
+)
 from app.services.course.chaoxing.signin import signin_manager
 from app.services.course.chaoxing.task_admission import TaskAdmissionError
 from app.services.course.zhihuishu.adapter import (
@@ -62,6 +69,53 @@ class CourseStartRequest(BaseModel):
     stop_at: str | None = None
     start_jitter_min: int = 0
     stop_jitter_min: int = 0
+    # Recurrence. `once` (default) keeps the historical one-shot behaviour;
+    # `daily` / `every_other_day` create a long-lived template that spawns a
+    # separate child task per occurrence.
+    repeat: str = "once"
+    time_of_day: str | None = None
+    anchor_date: str | None = None
+    # Replaces the absolute `stop_at` for recurring tasks: a cap on how long a
+    # single occurrence may run. `stop_at` stays accepted for older clients.
+    max_duration_min: int | None = None
+
+    @field_validator("repeat", mode="before")
+    @classmethod
+    def _normalize_repeat(cls, value: object) -> str:
+        try:
+            return normalize_repeat(value)
+        except RecurrenceError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("time_of_day", mode="before")
+    @classmethod
+    def _validate_time_of_day(cls, value: object) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        try:
+            parse_time_of_day(value)
+        except RecurrenceError as exc:
+            raise ValueError(str(exc)) from exc
+        return str(value).strip()
+
+    @field_validator("anchor_date", mode="before")
+    @classmethod
+    def _validate_anchor_date(cls, value: object) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        try:
+            parse_anchor_date(value)
+        except RecurrenceError as exc:
+            raise ValueError(str(exc)) from exc
+        return str(value).strip()
+
+    @field_validator("max_duration_min", mode="before")
+    @classmethod
+    def _validate_max_duration(cls, value: object) -> int | None:
+        try:
+            return clamp_duration_minutes(value)
+        except RecurrenceError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("start_jitter_min", "stop_jitter_min", mode="before")
     @classmethod
@@ -73,6 +127,18 @@ class CourseStartRequest(BaseModel):
     def _validate_schedule(self) -> "CourseStartRequest":
         start_at = (self.start_at or "").strip()
         stop_at = (self.stop_at or "").strip()
+
+        if self.repeat != "once":
+            # A recurring task is driven by its wall-clock time, not by an
+            # absolute start_at, so start_at is not required (and is ignored).
+            if not self.time_of_day:
+                raise ValueError("time_of_day is required when repeat is daily or every_other_day")
+            if self.repeat == "every_other_day" and not self.anchor_date:
+                # Anchor the 2-day cadence to the request date so a restart keeps
+                # the same parity instead of drifting.
+                self.anchor_date = datetime.now(timezone.utc).date().isoformat()
+            return self
+
         if not start_at and not stop_at:
             return self
         if not start_at and stop_at:
@@ -253,12 +319,18 @@ async def start_course_learning(
             "tiku_config": request.tiku_config or {},
             "notify_config": request.notify_config or {},
         }
-        is_scheduled = bool((request.start_at or "").strip())
+        is_recurring_request = request.repeat != "once"
+        is_scheduled = bool((request.start_at or "").strip()) or is_recurring_request
         if is_scheduled:
             payload["start_at"] = request.start_at
             payload["stop_at"] = request.stop_at
             payload["start_jitter_min"] = request.start_jitter_min
             payload["stop_jitter_min"] = request.stop_jitter_min
+        if is_recurring_request:
+            payload["repeat"] = request.repeat
+            payload["time_of_day"] = request.time_of_day
+            payload["anchor_date"] = request.anchor_date
+            payload["max_duration_min"] = request.max_duration_min
         task_id = await _run_blocking(
             learning_manager.start_task,
             user_id=user_id,
@@ -389,6 +461,10 @@ async def resume_course_task(task_id: str, current_user: dict = Depends(get_curr
     learning_manager = _get_learning_manager()
     result = await _run_blocking(learning_manager.resume_task, user_id=user_id, task_id=task_id)
     if result.get("status") == "error":
+        # `invalid_status` is a conflict (e.g. a recurring schedule has nothing
+        # to resume), not a missing task.
+        if result.get("code") == "invalid_status":
+            raise HTTPException(status_code=409, detail=result.get("message", "Cannot resume this task"))
         raise HTTPException(status_code=404, detail=result.get("message", "Task not found"))
     return {"status": "success", "message": result.get("message", "Task resumed"), "data": result}
 

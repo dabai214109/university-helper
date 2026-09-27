@@ -15,6 +15,16 @@ from .cookie_vault import chaoxing_cookie_vault
 from .endpoint_security import validate_tiku_config
 from .learning import ChapterTask, JobProcessor, init_chaoxing
 from .payload_mapper import normalize_tiku_config
+from .recurrence import (
+    REPEAT_ONCE,
+    RecurrenceError,
+    describe_schedule,
+    first_occurrence,
+    next_occurrence,
+    normalize_repeat,
+    parse_anchor_date,
+    parse_time_of_day,
+)
 from .task_admission import (
     MAX_ACTIVE_TASKS,
     TaskAlreadyActiveError,
@@ -22,6 +32,8 @@ from .task_admission import (
     cleanup_task_records,
     count_active_tasks,
     is_active_status,
+    is_recurring_status,
+    is_terminal_status,
     sort_task_records,
 )
 
@@ -136,9 +148,20 @@ class ChaoxingLearningManager:
 
         normalized_user_id = str(user_id or "").strip()
         schedule_start_at = (payload or {}).get("start_at")
-        is_scheduled = isinstance(schedule_start_at, str) and schedule_start_at.strip()
+        raw_repeat = (payload or {}).get("repeat")
+        try:
+            repeat = normalize_repeat(raw_repeat)
+        except RecurrenceError as exc:
+            raise ValueError(str(exc)) from exc
+        is_recurring = repeat != REPEAT_ONCE
+        is_scheduled = (
+            isinstance(schedule_start_at, str) and schedule_start_at.strip()
+        ) or is_recurring
         with self._lock:
             cleanup_task_records(self._tasks)
+            # A recurring template is NOT active, so it does not block the user
+            # from running anything else — that is the whole point of keeping it
+            # out of ACTIVE_TASK_STATUSES.
             if any(
                 str(task.get("user_id") or "").strip() == normalized_user_id and is_active_status(task.get("status"))
                 for task in self._tasks.values()
@@ -152,26 +175,9 @@ class ChaoxingLearningManager:
             pause_event.set()
             stop_event = threading.Event()
             now = _utc_now_iso()
-            base_progress = {
-                "total": 0,
-                "completed": 0,
-                "failed": 0,
-                "current": 0,
-                "total_chapters": 0,
-                "completed_chapters": 0,
-                "current_course": "",
-                "current_chapter": "",
-                "video_progress": None,
-            }
+            base_progress = self._default_progress()
             if is_scheduled:
-                schedule_dict: dict[str, Any] = {
-                    "start_at": schedule_start_at,
-                    "stop_at": (payload or {}).get("stop_at"),
-                    "start_jitter_min": int((payload or {}).get("start_jitter_min", 0) or 0),
-                    "stop_jitter_min": int((payload or {}).get("stop_jitter_min", 0) or 0),
-                    "fire_at": None,
-                    "actual_stop_at": None,
-                }
+                schedule_dict = self._build_schedule_dict(payload, repeat=repeat, now_iso=now)
                 credentials_dict: dict[str, Any] = {
                     "username": (payload or {}).get("username", ""),
                     "password": (payload or {}).get("password", ""),
@@ -185,25 +191,46 @@ class ChaoxingLearningManager:
                     "unopened_strategy": (payload or {}).get("unopened_strategy"),
                     "notify_config": (payload or {}).get("notify_config") or {},
                 }
-                task_state: dict[str, Any] = {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "platform": "chaoxing",
-                    "status": "scheduled",
-                    "message": "Scheduled, waiting for dispatch",
-                    "current_task": "scheduled",
-                    "progress": base_progress,
-                    "created_at": now,
-                    "started_at": now,
-                    "updated_at": now,
-                    "logs": [],
-                    "_log_cursor": 0,
-                    "_pause_event": pause_event,
-                    "_stop_event": stop_event,
-                    "schedule": schedule_dict,
-                    "credentials": credentials_dict,
-                    "schedule_args": schedule_args_dict,
-                }
+                if is_recurring:
+                    task_state: dict[str, Any] = {
+                        "task_id": task_id,
+                        "user_id": user_id,
+                        "platform": "chaoxing",
+                        "status": "recurring",
+                        "message": f"Recurring template ({describe_schedule(schedule_dict)})",
+                        "current_task": "recurring",
+                        "progress": base_progress,
+                        "created_at": now,
+                        "started_at": now,
+                        "updated_at": now,
+                        "logs": [],
+                        "_log_cursor": 0,
+                        "_pause_event": pause_event,
+                        "_stop_event": stop_event,
+                        "schedule": schedule_dict,
+                        "credentials": credentials_dict,
+                        "schedule_args": schedule_args_dict,
+                    }
+                else:
+                    task_state: dict[str, Any] = {
+                        "task_id": task_id,
+                        "user_id": user_id,
+                        "platform": "chaoxing",
+                        "status": "scheduled",
+                        "message": "Scheduled, waiting for dispatch",
+                        "current_task": "scheduled",
+                        "progress": base_progress,
+                        "created_at": now,
+                        "started_at": now,
+                        "updated_at": now,
+                        "logs": [],
+                        "_log_cursor": 0,
+                        "_pause_event": pause_event,
+                        "_stop_event": stop_event,
+                        "schedule": schedule_dict,
+                        "credentials": credentials_dict,
+                        "schedule_args": schedule_args_dict,
+                    }
             else:
                 task_state: dict[str, Any] = {
                     "task_id": task_id,
@@ -261,6 +288,114 @@ class ChaoxingLearningManager:
             if not task or str(task.get("user_id")) != normalized_user_id:
                 return None
             return self._public_view(task)
+
+    @staticmethod
+    def _build_schedule_dict(
+        payload: dict[str, Any],
+        *,
+        repeat: str,
+        now_iso: str,
+    ) -> dict[str, Any]:
+        """Assemble the persisted `schedule` block for a scheduled/recurring task.
+
+        One-shot tasks keep the historical absolute `start_at` semantics; a
+        recurring template stores its wall-clock rule plus the resolved next
+        firing so the dispatcher does not have to recompute it every tick.
+        """
+        schedule: dict[str, Any] = {
+            "start_at": (payload or {}).get("start_at"),
+            "stop_at": (payload or {}).get("stop_at"),
+            "start_jitter_min": int((payload or {}).get("start_jitter_min", 0) or 0),
+            "stop_jitter_min": int((payload or {}).get("stop_jitter_min", 0) or 0),
+            "fire_at": None,
+            "actual_stop_at": None,
+            "repeat": repeat,
+        }
+        if repeat == REPEAT_ONCE:
+            return schedule
+
+        time_of_day = parse_time_of_day((payload or {}).get("time_of_day"))
+        anchor_date = parse_anchor_date((payload or {}).get("anchor_date"))
+        schedule["time_of_day"] = time_of_day.strftime("%H:%M")
+        schedule["anchor_date"] = anchor_date.isoformat() if anchor_date else None
+        schedule["max_duration_min"] = (payload or {}).get("max_duration_min")
+
+        now_dt = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=UTC)
+        schedule["next_fire_at"] = first_occurrence(
+            repeat, time_of_day, now=now_dt, anchor_date=anchor_date
+        ).isoformat()
+        schedule["last_fired_at"] = None
+        schedule["fired_count"] = 0
+        return schedule
+
+    def _spawn_recurring_child_locked(
+        self,
+        *,
+        template: dict[str, Any],
+        payload: dict[str, Any],
+        schedule: dict[str, Any],
+        now: datetime,
+    ) -> str | None:
+        """Create the child task for one recurring occurrence. Caller holds the lock.
+
+        The child is a normal task (status ``pending``) so it runs through the
+        existing worker path and shows up in the user's task list. Admission
+        checks are deliberately NOT re-run here: the occurrence is due, and the
+        user's own one-active-task rule must not silently swallow a scheduled
+        run. Capacity is still respected.
+        """
+        if count_active_tasks(self._tasks) >= MAX_ACTIVE_TASKS:
+            logger.warning(
+                "recurring occurrence skipped: task capacity reached (template=%s)",
+                template.get("task_id"),
+            )
+            return None
+
+        child_id = uuid4().hex
+        pause_event = threading.Event()
+        pause_event.set()
+        now_iso = now.isoformat()
+        child_schedule: dict[str, Any] = {
+            "repeat": REPEAT_ONCE,
+            "start_at": None,
+            "stop_at": None,
+            "start_jitter_min": 0,
+            "stop_jitter_min": 0,
+            "fire_at": None,
+            "actual_stop_at": None,
+            # Lineage: lets the admin console group a run back to its schedule.
+            "parent_task_id": str(template.get("task_id") or ""),
+        }
+        max_duration = schedule.get("max_duration_min")
+        if max_duration:
+            try:
+                child_schedule["actual_stop_at"] = (
+                    now + timedelta(minutes=int(max_duration))
+                ).isoformat()
+            except (TypeError, ValueError):
+                pass
+
+        child: dict[str, Any] = {
+            "task_id": child_id,
+            "user_id": str(template.get("user_id") or ""),
+            "platform": "chaoxing",
+            "status": "pending",
+            "message": "Recurring occurrence starting",
+            "current_task": "preparing",
+            "progress": self._default_progress(),
+            "created_at": now_iso,
+            "started_at": now_iso,
+            "updated_at": now_iso,
+            "logs": [],
+            "_log_cursor": 0,
+            "_pause_event": pause_event,
+            "_stop_event": threading.Event(),
+            "schedule": child_schedule,
+        }
+        self._tasks[child_id] = child
+        return child_id
 
     def list_tasks(self, user_id: str) -> list[dict[str, Any]]:
         self._ensure_tasks_loaded_for_user(user_id)
@@ -332,6 +467,15 @@ class ChaoxingLearningManager:
                     "message": "Scheduled task: use stop or reschedule",
                     "code": "invalid_status",
                 }
+            if is_recurring_status(task.get("status")):
+                # A template has no run in flight to pause; pausing it would
+                # overwrite the `recurring` status and silently destroy the
+                # schedule. Stopping the template is the supported action.
+                return {
+                    "status": "error",
+                    "message": "Recurring task: stop the schedule instead",
+                    "code": "invalid_status",
+                }
             pause_event: threading.Event = task["_pause_event"]
             pause_event.clear()
             task["status"] = "paused"
@@ -357,6 +501,14 @@ class ChaoxingLearningManager:
                 return {"status": "error", "message": "Task not found"}
             if task.get("status") in {"completed", "failed", "error", "cancelled"}:
                 return {"status": task.get("status", "completed"), "message": "Task already finished"}
+            if is_recurring_status(task.get("status")):
+                # "Resuming" a template would flip it to `running`, which the
+                # dispatcher no longer recognises as a schedule.
+                return {
+                    "status": "error",
+                    "message": "Recurring task: it is always active; stop it to cancel",
+                    "code": "invalid_status",
+                }
             pause_event: threading.Event = task["_pause_event"]
             pause_event.set()
             task["status"] = "running"
@@ -384,12 +536,22 @@ class ChaoxingLearningManager:
                 return {"status": "error", "message": "Task not found"}
             if task.get("status") in {"completed", "failed", "error", "cancelled"}:
                 return {"status": task.get("status", "completed"), "message": "Task already finished"}
-            if task.get("status") == "scheduled":
+            if task.get("status") == "scheduled" or is_recurring_status(task.get("status")):
+                # Both a pending one-shot task and a recurring template are
+                # "waiting" states: cancelling them is a state change, not a
+                # cooperative stop of a running worker. This is also the only way
+                # to delete a recurring schedule.
+                was_recurring = is_recurring_status(task.get("status"))
                 task["status"] = "cancelled"
-                task["message"] = "Scheduled task cancelled"
+                task["message"] = (
+                    "Recurring schedule cancelled" if was_recurring else "Scheduled task cancelled"
+                )
+                task["current_task"] = "cancelled"
                 task["updated_at"] = _utc_now_iso()
+                task.setdefault("finished_at", task["updated_at"])
                 persist_request = self._prepare_persist_locked(task)
                 is_scheduled_cancel = True
+                cancel_message = task["message"]
             else:
                 stop_event: threading.Event = task["_stop_event"]
                 pause_event: threading.Event = task["_pause_event"]
@@ -403,8 +565,8 @@ class ChaoxingLearningManager:
         if persist_request:
             self._persist_task_state(*persist_request)
         if is_scheduled_cancel:
-            self._append_task_log(task_id, "Scheduled task cancelled", "warning")
-            return {"status": "cancelled", "message": "Scheduled task cancelled"}
+            self._append_task_log(task_id, cancel_message, "warning")
+            return {"status": "cancelled", "message": cancel_message}
         self._append_task_log(task_id, "Task cancellation requested", "warning")
         return {"status": "cancelling", "message": "Task cancellation requested"}
 
@@ -469,26 +631,91 @@ class ChaoxingLearningManager:
                 task = None
         if task is None:
             self._load_task_from_store(normalized_user_id, normalized_task_id)
+
+        child_to_start: tuple[str, str, dict[str, Any]] | None = None
         with self._lock:
             task = self._tasks.get(normalized_task_id)
             if not task or str(task.get("user_id")) != normalized_user_id:
                 return {"status": "error", "message": "Task not found", "code": "not_found"}
-            if task.get("status") != "scheduled":
+
+            status = str(task.get("status") or "").lower()
+            if is_recurring_status(status):
+                # "Run once now" must not consume the schedule: it spawns the
+                # same child task a due occurrence would, and leaves the
+                # template's next_fire_at untouched.
+                schedule = task.get("schedule")
+                if not isinstance(schedule, dict):
+                    schedule = {}
+                creds = task.get("credentials")
+                if not isinstance(creds, dict):
+                    creds = {}
+                sched_args = task.get("schedule_args")
+                if not isinstance(sched_args, dict):
+                    sched_args = {}
+                child_payload = dict(sched_args)
+                child_payload.update(creds)
+                child_id = self._spawn_recurring_child_locked(
+                    template=task,
+                    payload=child_payload,
+                    schedule=schedule,
+                    now=datetime.now(UTC),
+                )
+                if child_id is None:
+                    return {
+                        "status": "error",
+                        "message": "Task capacity reached; retry later",
+                        "code": "capacity",
+                    }
+                child_task = self._tasks.get(child_id)
+                if child_task is not None:
+                    persist_request = self._prepare_persist_locked(child_task)
+                else:  # pragma: no cover - defensive
+                    persist_request = None
+                child_to_start = (child_id, normalized_user_id, child_payload)
+            elif status == "scheduled":
+                schedule = task.get("schedule")
+                if not isinstance(schedule, dict):
+                    schedule = {}
+                schedule["fire_at"] = _utc_now_iso()
+                task["schedule"] = schedule
+                task["message"] = "Scheduled task starting now"
+                task["updated_at"] = _utc_now_iso()
+                persist_request = self._prepare_persist_locked(task)
+            else:
                 return {
                     "status": "error",
                     "message": "Only scheduled tasks can be started now",
                     "code": "invalid_status",
                 }
-            schedule = task.get("schedule")
-            if not isinstance(schedule, dict):
-                schedule = {}
-            schedule["fire_at"] = _utc_now_iso()
-            task["schedule"] = schedule
-            task["message"] = "Scheduled task starting now"
-            task["updated_at"] = _utc_now_iso()
-            persist_request = self._prepare_persist_locked(task)
+
         if persist_request:
             self._persist_task_state(*persist_request)
+
+        if child_to_start is not None:
+            child_id, uid, payload = child_to_start
+            try:
+                threading.Thread(
+                    target=self._run_task_worker_guarded,
+                    args=(child_id, uid, payload),
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                self._fail_task(child_id, THREAD_START_FAILURE_MESSAGE)
+                logger.exception("start-now: failed to start worker for %s: %s", child_id, exc)
+                return {
+                    "status": "error",
+                    "message": THREAD_START_FAILURE_MESSAGE,
+                    "code": "thread_start_failed",
+                }
+            self._append_task_log(
+                task_id, f"Recurring occurrence started manually → task {child_id}", "info"
+            )
+            return {
+                "status": "pending",
+                "message": "Recurring occurrence started",
+                "child_task_id": child_id,
+            }
+
         self._append_task_log(task_id, "Task start-now requested", "info")
         return {"status": "scheduled", "message": "Task will start immediately"}
 
@@ -518,7 +745,10 @@ class ChaoxingLearningManager:
                 should_restore = True
                 setattr(self, restore_key, now_ts)
 
-            for task in self._tasks.values():
+            # Snapshot the values: the recurring branch below ADDS child tasks to
+            # self._tasks, and mutating a dict while iterating it raises
+            # RuntimeError. A child created now is picked up on the next tick.
+            for task in list(self._tasks.values()):
                 status = str(task.get("status") or "").lower()
                 schedule = task.get("schedule")
                 if not isinstance(schedule, dict):
@@ -526,6 +756,109 @@ class ChaoxingLearningManager:
 
                 task_id = str(task.get("task_id") or "")
                 uid = str(task.get("user_id") or "")
+
+                if status == "recurring":
+                    # A template is due when its wall-clock slot has arrived. On
+                    # each firing it spawns a SEPARATE child task, so per-run
+                    # history stays intact and the template keeps living.
+                    next_fire_raw = schedule.get("next_fire_at")
+                    if not next_fire_raw:
+                        continue
+                    try:
+                        next_fire_dt = datetime.fromisoformat(
+                            str(next_fire_raw).strip().replace("Z", "+00:00")
+                        )
+                        if next_fire_dt.tzinfo is None:
+                            next_fire_dt = next_fire_dt.replace(tzinfo=UTC)
+                    except (ValueError, TypeError, OverflowError):
+                        continue
+
+                    if next_fire_dt > datetime.now(UTC):
+                        continue
+
+                    creds = task.get("credentials")
+                    has_password = (
+                        isinstance(creds, dict)
+                        and creds.get("username")
+                        and creds.get("password")
+                    )
+                    has_qr_session = bool(chaoxing_cookie_vault.get(uid))
+                    if not has_password and not has_qr_session:
+                        # Skip this occurrence rather than killing the schedule:
+                        # the user may re-scan and later runs should still work.
+                        pending_logs.append(
+                            (
+                                task_id,
+                                "Recurring occurrence skipped: missing credentials "
+                                "(re-scan the QR code or provide a password)",
+                                "warning",
+                            )
+                        )
+                    else:
+                        sched_args = task.get("schedule_args")
+                        if not isinstance(sched_args, dict):
+                            sched_args = {}
+                        child_payload = dict(sched_args)
+                        child_payload.update(creds or {})
+                        child_id = self._spawn_recurring_child_locked(
+                            template=task,
+                            payload=child_payload,
+                            schedule=schedule,
+                            now=datetime.now(UTC),
+                        )
+                        if child_id:
+                            to_fire.append((child_id, uid, child_payload))
+                            # Persist the child before its worker starts, exactly
+                            # as the one-shot path persists the fired task.
+                            child_task = self._tasks.get(child_id)
+                            if child_task is not None:
+                                pr_child = self._prepare_persist_locked(child_task)
+                                if pr_child:
+                                    to_persist.append(pr_child)
+                            pending_logs.append(
+                                (
+                                    task_id,
+                                    f"Recurring occurrence fired → task {child_id}",
+                                    "info",
+                                )
+                            )
+
+                    # Advance the template regardless: skipping an occurrence must
+                    # not leave it stuck on a past slot.
+                    try:
+                        time_of_day = parse_time_of_day(schedule.get("time_of_day"))
+                        next_dt = next_occurrence(
+                            str(schedule.get("repeat") or "daily"),
+                            next_fire_dt,
+                            time_of_day,
+                        )
+                    except RecurrenceError:
+                        continue
+                    # Never queue a backlog: if the service was down for days,
+                    # jump straight to the next future slot instead of firing
+                    # every missed occurrence at once.
+                    now_dt = datetime.now(UTC)
+                    while next_dt <= now_dt:
+                        try:
+                            next_dt = next_occurrence(
+                                str(schedule.get("repeat") or "daily"),
+                                next_dt,
+                                parse_time_of_day(schedule.get("time_of_day")),
+                            )
+                        except RecurrenceError:
+                            break
+                    schedule["next_fire_at"] = next_dt.isoformat()
+                    schedule["last_fired_at"] = _utc_now_iso()
+                    schedule["fired_count"] = int(schedule.get("fired_count") or 0) + 1
+                    task["updated_at"] = _utc_now_iso()
+                    task["message"] = (
+                        f"Recurring template ({describe_schedule(schedule)}) — "
+                        f"next {next_dt.isoformat()}"
+                    )
+                    pr = self._prepare_persist_locked(task)
+                    if pr:
+                        to_persist.append(pr)
+                    continue
 
                 if status == "scheduled":
                     if schedule.get("fire_at") is None:
@@ -596,6 +929,7 @@ class ChaoxingLearningManager:
                             )
                             task["current_task"] = "failed"
                             task["updated_at"] = _utc_now_iso()
+                            task.setdefault("finished_at", task["updated_at"])
                             pending_logs.append(
                                 (task_id, task["message"], "error")
                             )
@@ -758,6 +1092,9 @@ class ChaoxingLearningManager:
             self._fail_task(task_id, "No available courses after filtering")
             return
 
+        # Seed the queue view with every selected course, in FIFO order. Names
+        # are available here, so the page can render the whole queue before the
+        # first course's chapters are even fetched.
         self._update_progress(
             task_id,
             total=len(selected_courses),
@@ -769,6 +1106,15 @@ class ChaoxingLearningManager:
             current_course="",
             current_chapter="",
             video_progress=None,
+            courses=[
+                {
+                    "name": _course_label(course),
+                    "status": "pending",
+                    "chapters_done": 0,
+                    "chapters_total": 0,
+                }
+                for course in selected_courses
+            ],
         )
         self._append_task_log(
             task_id,
@@ -802,6 +1148,7 @@ class ChaoxingLearningManager:
                 current_chapter="",
                 video_progress=None,
             )
+            self._update_course_entry(task_id, index, status="running")
             self._append_task_log(task_id, f"Start course: {course_name}", "info")
 
             try:
@@ -811,10 +1158,12 @@ class ChaoxingLearningManager:
                 failed_courses += 1
                 self._append_task_log(task_id, f"Fetch chapters failed for {course_name}: {exc}", "error")
                 self._update_progress(task_id, failed=failed_courses, current=index)
+                self._update_course_entry(task_id, index, status="failed")
                 continue
 
             if points:
                 self._increase_progress(task_id, "total_chapters", len(points))
+                self._update_course_entry(task_id, index, chapters_total=len(points))
 
             callback_lock = threading.Lock()
             last_video_tick = {"ts": 0.0}
@@ -834,9 +1183,13 @@ class ChaoxingLearningManager:
                     current_task=f"chapter:{point.get('title', '')}",
                 )
 
-            def chapter_done_callback(_: dict[str, Any], point: dict[str, Any]) -> None:
+            def chapter_done_callback(
+                _: dict[str, Any],
+                point: dict[str, Any],
+                course_index: int = index,
+            ) -> None:
                 del point
-                self._increase_progress(task_id, "completed_chapters", 1)
+                self._mark_chapter_done(task_id, course_index)
 
             def video_progress_callback(
                 _: dict[str, Any],
@@ -882,12 +1235,15 @@ class ChaoxingLearningManager:
                         f"Course finished with {len(processor.failed_tasks)} failed chapters: {course_name}",
                         "warning",
                     )
+                    self._update_course_entry(task_id, index, status="failed")
                 else:
                     completed_courses += 1
                     self._append_task_log(task_id, f"Course completed: {course_name}", "success")
+                    self._update_course_entry(task_id, index, status="completed")
             except Exception as exc:
                 failed_courses += 1
                 self._append_task_log(task_id, f"Course execution failed {course_name}: {exc}", "error")
+                self._update_course_entry(task_id, index, status="failed")
 
             self._update_progress(
                 task_id,
@@ -986,6 +1342,14 @@ class ChaoxingLearningManager:
             self._fail_task(task_id, message)
 
     def _select_courses(self, all_courses: list[dict[str, Any]], selectors: list[str]) -> list[dict[str, Any]]:
+        """Resolve selectors to courses, preserving the caller's order (FIFO).
+
+        The selectors are the user's tick order on the course list, so they are
+        the OUTER loop: the queue must run in the order the user chose, not in
+        the order Chaoxing happens to return courses. Within one selector the
+        backend list order still applies, which only matters when a selector is
+        broad enough to match several courses (e.g. courseId with no clazz).
+        """
         if not selectors:
             return list(all_courses)
 
@@ -993,11 +1357,11 @@ class ChaoxingLearningManager:
         selected: list[dict[str, Any]] = []
         seen: set[str] = set()
 
-        for course in all_courses:
-            course_id = str(course.get("courseId") or "")
-            clazz_id = str(course.get("clazzId") or "")
-            cpi = str(course.get("cpi") or "")
-            for target_course, target_clazz, target_cpi in parsed:
+        for target_course, target_clazz, target_cpi in parsed:
+            for course in all_courses:
+                course_id = str(course.get("courseId") or "")
+                clazz_id = str(course.get("clazzId") or "")
+                cpi = str(course.get("cpi") or "")
                 if target_course and course_id != target_course:
                     continue
                 if target_clazz and clazz_id != target_clazz:
@@ -1005,10 +1369,13 @@ class ChaoxingLearningManager:
                 if target_cpi and cpi != target_cpi:
                     continue
                 identity = f"{course_id}_{clazz_id}_{cpi}"
-                if identity not in seen:
-                    seen.add(identity)
-                    selected.append(course)
-                break
+                if identity in seen:
+                    # A course matched by an earlier selector keeps its place in
+                    # the queue; dedupe here instead of `break`, so one selector
+                    # can still claim several courses.
+                    continue
+                seen.add(identity)
+                selected.append(course)
 
         return selected
 
@@ -1031,10 +1398,45 @@ class ChaoxingLearningManager:
         return not stop_event.is_set()
 
     def _cancel_task(self, task_id: str, message: str) -> None:
+        self._settle_course_entries(task_id, "cancelled")
         self._update_task(task_id, status="cancelled", message=message, current_task="cancelled")
         self._append_task_log(task_id, message, "warning")
 
+    def _settle_course_entries(self, task_id: str, status: str) -> None:
+        """Mark every non-terminal queue entry as ``status``.
+
+        Called when a task ends for a reason that is not per-course (cancel,
+        restart). Without it a cancelled run would leave the last course stuck
+        on "running" in the queue view forever.
+        """
+        persist_request: tuple[dict[str, Any], _TaskPersistSequencer, int] | None = None
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return
+            progress = dict(task.get("progress") or {})
+            courses = progress.get("courses")
+            if not isinstance(courses, list) or not courses:
+                return
+            changed = False
+            settled: list[Any] = []
+            for entry in courses:
+                if isinstance(entry, dict) and str(entry.get("status") or "") in ("pending", "running"):
+                    settled.append({**entry, "status": status})
+                    changed = True
+                else:
+                    settled.append(entry)
+            if not changed:
+                return
+            progress["courses"] = settled
+            task["progress"] = progress
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+
     def _fail_task(self, task_id: str, message: str) -> None:
+        self._settle_course_entries(task_id, "failed")
         self._update_task(task_id, status="failed", message=message, current_task="failed")
         self._append_task_log(task_id, message, "error")
 
@@ -1052,6 +1454,7 @@ class ChaoxingLearningManager:
                 current_task="failed",
                 updated_at=now,
             )
+            task.setdefault("finished_at", now)
             task["logs"].append(
                 {
                     "timestamp": now,
@@ -1103,6 +1506,12 @@ class ChaoxingLearningManager:
             if all(task.get(key) == value for key, value in changes.items()):
                 return
             task.update(changes)
+            # Stamp the end time exactly once, on the transition into a terminal
+            # status. Every terminal path (completed / failed / cancelled) goes
+            # through here, so the admin history has one authoritative field
+            # instead of inferring an end time from `updated_at`.
+            if "status" in changes and is_terminal_status(changes.get("status")):
+                task.setdefault("finished_at", _utc_now_iso())
             task["updated_at"] = _utc_now_iso()
             persist_request = self._prepare_persist_locked(task)
         if persist_request:
@@ -1139,6 +1548,70 @@ class ChaoxingLearningManager:
         if persist_request:
             self._persist_task_state(*persist_request)
 
+    def _update_course_entry(self, task_id: str, index: int, **changes: Any) -> None:
+        """Merge ``changes`` into one entry of ``progress.courses`` (1-based index).
+
+        ``_update_progress`` replaces a key wholesale, so a single entry has to
+        be read, patched and written back. Out-of-range indices are ignored:
+        the array is only a view, and a missing entry must never break the run.
+        """
+        persist_request: tuple[dict[str, Any], _TaskPersistSequencer, int] | None = None
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return
+            progress = dict(task.get("progress") or {})
+            courses = progress.get("courses")
+            if not isinstance(courses, list):
+                return
+            position = int(index) - 1
+            if position < 0 or position >= len(courses):
+                return
+            entry = courses[position]
+            if not isinstance(entry, dict):
+                return
+            updated = list(courses)
+            updated[position] = {**entry, **changes}
+            progress["courses"] = updated
+            task["progress"] = progress
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task, force=False)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+
+    def _mark_chapter_done(self, task_id: str, index: int) -> None:
+        """Record one finished chapter: global counter + the course's own counter.
+
+        Both counters live in ``progress``, so they are updated under a single
+        lock acquisition. This runs once per chapter from the (concurrent)
+        chapter workers, so taking the lock twice would be needless contention.
+        """
+        persist_request: tuple[dict[str, Any], _TaskPersistSequencer, int] | None = None
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return
+            progress = dict(task.get("progress") or {})
+            progress["completed_chapters"] = int(progress.get("completed_chapters") or 0) + 1
+
+            courses = progress.get("courses")
+            if isinstance(courses, list):
+                position = int(index) - 1
+                if 0 <= position < len(courses) and isinstance(courses[position], dict):
+                    entry = courses[position]
+                    updated = list(courses)
+                    updated[position] = {
+                        **entry,
+                        "chapters_done": int(entry.get("chapters_done") or 0) + 1,
+                    }
+                    progress["courses"] = updated
+
+            task["progress"] = progress
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task, force=False)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+
     @staticmethod
     def _task_public_payload(task: dict[str, Any]) -> dict[str, Any]:
         return {k: v for k, v in task.items() if not str(k).startswith("_")}
@@ -1164,6 +1637,11 @@ class ChaoxingLearningManager:
             "current_course": "",
             "current_chapter": "",
             "video_progress": None,
+            # Per-course queue view, in the order the user ticked them. The
+            # scalars above stay authoritative for the existing UI; this array
+            # is what lets the page show the whole queue (pending / running /
+            # done) instead of only the course currently being worked on.
+            "courses": [],
         }
 
     def _prepare_persist_locked(
@@ -1295,6 +1773,7 @@ class ChaoxingLearningManager:
             task["message"] = RESTART_INTERRUPTED_MESSAGE
             task["current_task"] = "failed"
             task["updated_at"] = current_time
+            task.setdefault("finished_at", current_time)
             task["logs"].append(
                 {
                     "timestamp": current_time,
@@ -1304,6 +1783,28 @@ class ChaoxingLearningManager:
             )
             if len(task["logs"]) > 1000:
                 del task["logs"][:-1000]
+        elif is_recurring_status(task.get("status")):
+            # A recurring template survives restart, but its stored next_fire_at
+            # may be in the past (the service was down). Recompute it forward —
+            # and never replay the missed occurrences, or a long outage would
+            # fire a burst of runs the moment the service comes back.
+            schedule = task.get("schedule")
+            if isinstance(schedule, dict):
+                try:
+                    time_of_day = parse_time_of_day(schedule.get("time_of_day"))
+                    repeat = normalize_repeat(schedule.get("repeat"))
+                    anchor = parse_anchor_date(schedule.get("anchor_date"))
+                    now_dt = datetime.fromisoformat(str(current_time).replace("Z", "+00:00"))
+                    if now_dt.tzinfo is None:
+                        now_dt = now_dt.replace(tzinfo=UTC)
+                    schedule["next_fire_at"] = first_occurrence(
+                        repeat, time_of_day, now=now_dt, anchor_date=anchor
+                    ).isoformat()
+                except (RecurrenceError, ValueError, TypeError, OverflowError):
+                    logger.warning(
+                        "recurring task restore: could not recompute next_fire_at (task=%s)",
+                        task_id,
+                    )
         else:
             # "scheduled" tasks survive restart: restore their pause/stop events.
             pass

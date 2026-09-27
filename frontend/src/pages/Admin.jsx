@@ -18,6 +18,7 @@ import {
   StatusBadge,
   useToast,
 } from '../components'
+import LearningRecordsPanel from './admin/LearningRecordsPanel'
 
 const CARD = 'rounded-2xl border border-border/20 bg-surface/80 p-6 shadow-lg backdrop-blur-lg'
 const INPUT = 'w-full rounded-xl border border-border bg-surface px-4 py-2.5 text-sm text-text'
@@ -28,6 +29,8 @@ const BTN_GHOST =
   'inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-border bg-surface px-4 text-sm font-medium text-text/70 hover:bg-surface-hover disabled:opacity-50'
 
 const SCHEDULED_STATUS = 'scheduled'
+// `recurring` is a long-lived template, not active work, so it is deliberately
+// absent here — otherwise a schedule would show as a live task forever.
 const ACTIVE_STATUSES = new Set(['running', 'pending', 'paused', 'cancelling', 'scheduled'])
 const isLive = (status) => ACTIVE_STATUSES.has(String(status || '').toLowerCase())
 
@@ -111,11 +114,18 @@ function ProgressBar({ progress }) {
 
 function ScheduledCard({ task, onStop, stopping }) {
   const schedule = task.schedule || {}
+  const isRecurring = String(task.status || '').toLowerCase() === 'recurring'
   const fireAt = schedule.fire_at
   // Prefer the resolved fire time; before the dispatcher runs, start_at is the
-  // closest available estimate.
-  const countdownTarget = fireAt || schedule.start_at
-  const isResolved = Boolean(fireAt)
+  // closest available estimate. A recurring template has neither — its next
+  // slot lives in next_fire_at.
+  const countdownTarget = isRecurring ? schedule.next_fire_at : (fireAt || schedule.start_at)
+  const isResolved = isRecurring ? Boolean(schedule.next_fire_at) : Boolean(fireAt)
+  const repeatLabel = schedule.repeat === 'daily'
+    ? '每天'
+    : schedule.repeat === 'every_other_day'
+      ? '隔天'
+      : ''
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-warning/30 bg-surface p-5 shadow-sm">
@@ -126,7 +136,7 @@ function ScheduledCard({ task, onStop, stopping }) {
           <CalendarClock className="h-3.5 w-3.5" aria-hidden="true" />
           chaoxing
         </span>
-        <StatusBadge status={SCHEDULED_STATUS} />
+        <StatusBadge status={isRecurring ? 'recurring' : SCHEDULED_STATUS} />
       </div>
 
       <h3 className="truncate font-mono text-sm font-semibold text-text" title={task.task_id}>
@@ -137,38 +147,65 @@ function ScheduledCard({ task, onStop, stopping }) {
       </p>
 
       <dl className="mt-4 space-y-1.5 text-xs">
-        <div className="flex justify-between gap-3">
-          <dt className="text-text-muted">计划启动</dt>
-          <dd className="text-right text-text/80">
-            {formatTime(schedule.start_at)}
-            <Jitter minutes={schedule.start_jitter_min} />
-          </dd>
-        </div>
-        <div className="flex justify-between gap-3">
-          <dt className="text-text-muted">计划停止</dt>
-          <dd className="text-right text-text/80">
-            {schedule.stop_at ? (
-              <>
-                {formatTime(schedule.stop_at)}
-                <Jitter minutes={schedule.stop_jitter_min} />
-              </>
-            ) : (
-              <span className="text-text-muted">不限（跑完为止）</span>
-            )}
-          </dd>
-        </div>
-        <div className="flex justify-between gap-3">
-          <dt className="text-text-muted">实际启动</dt>
-          <dd className="text-right text-text/80">
-            {isResolved ? formatTime(fireAt) : <span className="text-text-muted">待解析</span>}
-          </dd>
-        </div>
+        {isRecurring ? (
+          <>
+            <div className="flex justify-between gap-3">
+              <dt className="text-text-muted">执行周期</dt>
+              <dd className="text-right text-text/80">
+                {repeatLabel} {schedule.time_of_day || '--'}
+                <Jitter minutes={schedule.start_jitter_min} />
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-text-muted">下次执行</dt>
+              <dd className="text-right text-text/80">
+                {isResolved ? formatTime(schedule.next_fire_at) : <span className="text-text-muted">待解析</span>}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-text-muted">已执行</dt>
+              <dd className="text-right text-text/80">
+                {Number(schedule.fired_count) || 0} 次
+                {schedule.max_duration_min > 0 && `（单次上限 ${schedule.max_duration_min} 分钟）`}
+              </dd>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex justify-between gap-3">
+              <dt className="text-text-muted">计划启动</dt>
+              <dd className="text-right text-text/80">
+                {formatTime(schedule.start_at)}
+                <Jitter minutes={schedule.start_jitter_min} />
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-text-muted">计划停止</dt>
+              <dd className="text-right text-text/80">
+                {schedule.stop_at ? (
+                  <>
+                    {formatTime(schedule.stop_at)}
+                    <Jitter minutes={schedule.stop_jitter_min} />
+                  </>
+                ) : (
+                  <span className="text-text-muted">不限（跑完为止）</span>
+                )}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-text-muted">实际启动</dt>
+              <dd className="text-right text-text/80">
+                {isResolved ? formatTime(fireAt) : <span className="text-text-muted">待解析</span>}
+              </dd>
+            </div>
+          </>
+        )}
       </dl>
 
       <div className="mt-4 flex items-center justify-between gap-3 border-t border-dashed border-border pt-3">
         <div>
           <p className="text-[11px] text-text-muted">
-            {isResolved ? '距实际启动' : '距计划启动（抖动待解析）'}
+            {isRecurring ? '距下次执行' : isResolved ? '距实际启动' : '距计划启动（抖动待解析）'}
           </p>
           <p className="mt-0.5 text-lg">
             <Countdown target={countdownTarget} />
@@ -181,7 +218,7 @@ function ScheduledCard({ task, onStop, stopping }) {
           className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-danger/30 bg-danger-surface px-3 text-xs font-semibold text-danger hover:bg-danger/10 disabled:opacity-50"
         >
           <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-          {stopping ? '取消中...' : '取消'}
+          {stopping ? '取消中...' : isRecurring ? '取消周期' : '取消'}
         </button>
       </div>
     </div>
@@ -624,8 +661,16 @@ export default function Admin() {
   // table's status filter, so they query independently.
   const loadScheduled = useCallback(async () => {
     try {
-      const resp = await api(`/admin/tasks?status=${SCHEDULED_STATUS}&limit=200`)
-      if (resp?.status === 'success') setScheduled(resp.data)
+      // Recurring templates live in the same "waiting to run" bucket as
+      // one-shot scheduled tasks, so the queue panel shows both.
+      const [scheduledResp, recurringResp] = await Promise.all([
+        api(`/admin/tasks?status=${SCHEDULED_STATUS}&limit=200`),
+        api('/admin/tasks?status=recurring&limit=200'),
+      ])
+      const rows = []
+      if (scheduledResp?.status === 'success') rows.push(...(scheduledResp.data || []))
+      if (recurringResp?.status === 'success') rows.push(...(recurringResp.data || []))
+      setScheduled(rows)
     } catch (err) {
       handleApiError(err, '加载定时队列失败')
     }
@@ -723,6 +768,7 @@ export default function Admin() {
     { id: 'overview', label: '总览' },
     { id: 'users', label: '用户管理' },
     { id: 'tasks', label: '任务总览' },
+    { id: 'records', label: '刷课记录' },
     { id: 'queue', label: '定时队列', count: queueCount },
     { id: 'start', label: '发起任务' },
     { id: 'status', label: '系统状态' },
@@ -921,6 +967,8 @@ export default function Admin() {
           />
         </Card>
       )}
+
+      {view === 'records' && <LearningRecordsPanel users={users} />}
 
       {view === 'queue' && (
         <Card padding="compact">

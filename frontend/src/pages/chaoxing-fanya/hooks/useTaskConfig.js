@@ -48,6 +48,13 @@ export default function useTaskConfig() {
   const [startJitterMin, setStartJitterMin] = useState(10)
   const [stopJitterMin, setStopJitterMin] = useState(15)
 
+  // Recurrence. 'once' keeps the one-shot datetime pickers; 'daily' /
+  // 'every_other_day' switch to a wall-clock time plus a per-run duration cap.
+  const [repeat, setRepeat] = useState('once')
+  const [timeOfDay, setTimeOfDay] = useState('08:00')
+  const [anchorDate, setAnchorDate] = useState('')
+  const [maxDurationMin, setMaxDurationMin] = useState(120)
+
 
   return {
     speed, setSpeed,
@@ -66,6 +73,10 @@ export default function useTaskConfig() {
     scheduleStopAt, setScheduleStopAt,
     startJitterMin, setStartJitterMin,
     stopJitterMin, setStopJitterMin,
+    repeat, setRepeat,
+    timeOfDay, setTimeOfDay,
+    anchorDate, setAnchorDate,
+    maxDurationMin, setMaxDurationMin,
   }
 
 
