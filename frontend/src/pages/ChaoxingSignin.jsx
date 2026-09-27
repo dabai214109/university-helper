@@ -1418,6 +1418,7 @@ export default function ChaoxingSignin() {
                 <div className={GLASS_PANEL_CLASS}>
                   <ChaoxingQrLoginPanel
                     qrCode={qrLogin.qrCode}
+                    qrMime={qrLogin.qrMime}
                     qrStatus={qrLogin.qrStatus}
                     qrMessage={qrLogin.qrMessage}
                     qrError={qrLogin.qrError}

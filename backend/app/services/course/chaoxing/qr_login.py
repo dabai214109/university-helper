@@ -177,6 +177,31 @@ def _fetch_qr_image(session: requests.Session, uuid: str) -> bytes:
     return resp.content
 
 
+# The QR endpoint answers ``image/jpeg``, but the browser needs the right media
+# type in the data URL or the code can fail to render. Sniff the magic number
+# rather than trusting a hardcoded type on either side of the wire.
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+_DEFAULT_IMAGE_MIME = "image/jpeg"
+
+
+def sniff_image_mime(data: bytes) -> str:
+    """Return the media type of ``data``, falling back to JPEG.
+
+    JPEG is the observed Chaoxing format, so it is the safe default for an
+    unrecognised header.
+    """
+    for magic, mime in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return mime
+    return _DEFAULT_IMAGE_MIME
+
+
 def _read_auth_status(session: requests.Session, uuid: str, enc: str) -> dict[str, Any]:
     resp = session.post(
         AUTH_STATUS_URL,

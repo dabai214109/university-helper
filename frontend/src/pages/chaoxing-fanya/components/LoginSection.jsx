@@ -51,6 +51,7 @@ export default function LoginSection({
       {loginMethod === 'qr' ? (
         <ChaoxingQrLoginPanel
           qrCode={qrLogin.qrCode}
+          qrMime={qrLogin.qrMime}
           qrStatus={qrLogin.qrStatus}
           qrMessage={qrLogin.qrMessage}
           qrError={qrLogin.qrError}

@@ -22,7 +22,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.dependencies import get_current_user_id
 from app.services.course.chaoxing.cookie_vault import chaoxing_cookie_vault
-from app.services.course.chaoxing.qr_login import login_with_qr
+from app.services.course.chaoxing.qr_login import login_with_qr, sniff_image_mime
 from app.services.course.chaoxing.signin import signin_manager
 from app.services.course.chaoxing.task_admission import TaskAdmissionError
 
@@ -433,6 +433,7 @@ async def chaoxing_qr_login(user_id: str = Depends(get_current_user_id)):
         "status": "pending",
         "message": "请使用学习通 App 扫描二维码",
         "qr_code": None,
+        "qr_mime": "image/jpeg",
         "updated_at": time.time(),
         "user_id": user_id,
         "cancel_event": cancel_event,
@@ -447,6 +448,7 @@ async def chaoxing_qr_login(user_id: str = Depends(get_current_user_id)):
             if current is None:
                 return
             current["qr_code"] = encoded
+            current["qr_mime"] = sniff_image_mime(img_bytes)
             current["updated_at"] = time.time()
         qr_ready_event.set()
 
@@ -543,6 +545,7 @@ async def chaoxing_qr_login(user_id: str = Depends(get_current_user_id)):
                 "status": current.get("status", "pending"),
                 "message": current.get("message", ""),
                 "qr_code": current["qr_code"],
+                "qr_mime": current.get("qr_mime", "image/jpeg"),
             },
         }
 
@@ -562,6 +565,7 @@ async def chaoxing_qr_login_status(
             "status": state.get("status", "pending"),
             "message": state.get("message", ""),
             "qr_code": state.get("qr_code"),
+            "qr_mime": state.get("qr_mime", "image/jpeg"),
         }
     return {"status": True, "message": "ok", "data": payload}
 

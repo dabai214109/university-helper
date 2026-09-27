@@ -17,6 +17,7 @@ const QR_STATUS_LABELS = {
  */
 export default function ChaoxingQrLoginPanel({
   qrCode,
+  qrMime = 'image/jpeg',
   qrStatus,
   qrMessage,
   qrError,
@@ -51,19 +52,17 @@ export default function ChaoxingQrLoginPanel({
       <p className="text-sm text-text/70">{qrMessage || hint}</p>
 
       <div className="flex justify-center">
-        {qrLoading && !qrCode && (
-          <div className="flex h-56 w-56 items-center justify-center rounded-2xl border border-border/30 bg-surface/70">
-            <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden="true" />
-          </div>
-        )}
-        {!qrLoading && qrCode && (
+        {qrCode ? (
           <img
-            src={`data:image/png;base64,${qrCode}`}
+            src={`data:${qrMime};base64,${qrCode}`}
             alt="学习通登录二维码"
             className={`h-56 w-56 rounded-2xl border border-border/30 bg-surface object-contain shadow-sm ${imageClassName}`}
           />
-        )}
-        {!qrLoading && !qrCode && (
+        ) : qrLoading ? (
+          <div className="flex h-56 w-56 items-center justify-center rounded-2xl border border-border/30 bg-surface/70">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden="true" />
+          </div>
+        ) : (
           <div className="flex h-56 w-56 items-center justify-center rounded-2xl border border-dashed border-border/40 bg-surface/60 text-text/50">
             <QrCode className="h-10 w-10" aria-hidden="true" />
           </div>

@@ -228,6 +228,22 @@ def test_cancel_event_stops_the_loop(monkeypatch):
     assert result["message"] == "登录已取消"
 
 
+# ── image media type ──────────────────────────────────────────────────────────
+
+
+def test_sniff_image_mime_identifies_jpeg_and_png():
+    """The QR endpoint answers JPEG; the browser needs the matching data URL."""
+    assert qr_login.sniff_image_mime(b"\xff\xd8\xff\xe0" + b"payload") == "image/jpeg"
+    assert qr_login.sniff_image_mime(b"\x89PNG\r\n\x1a\n" + b"payload") == "image/png"
+
+
+def test_sniff_image_mime_defaults_to_jpeg_for_unknown_headers():
+    # JPEG is the observed Chaoxing format, so an unrecognised header must not
+    # fall back to png (which would break rendering).
+    assert qr_login.sniff_image_mime(b"") == "image/jpeg"
+    assert qr_login.sniff_image_mime(b"not-an-image") == "image/jpeg"
+
+
 # ── per-user vault ────────────────────────────────────────────────────────────
 
 

@@ -20,6 +20,7 @@ export const CHAOXING_QR_TERMINAL_STATES = new Set(['success', 'failed'])
  */
 export default function useChaoxingQrLogin({ request, onSuccess }) {
   const [qrCode, setQrCode] = useState('')
+  const [qrMime, setQrMime] = useState('image/jpeg')
   const [qrStatus, setQrStatus] = useState('idle')
   const [qrMessage, setQrMessage] = useState('')
   const [qrError, setQrError] = useState('')
@@ -102,6 +103,9 @@ export default function useChaoxingQrLogin({ request, onSuccess }) {
           // slow scan can still succeed.
           setQrCode((prev) => (prev === data.qr_code ? prev : data.qr_code))
         }
+        if (data.qr_mime) {
+          setQrMime(String(data.qr_mime))
+        }
 
         if (nextStatus === 'success') {
           stopPolling()
@@ -149,8 +153,15 @@ export default function useChaoxingQrLogin({ request, onSuccess }) {
 
       sessionOwnerRef.current = { generation, sessionId }
       setQrCode(data.qr_code)
+      if (data.qr_mime) {
+        setQrMime(String(data.qr_mime))
+      }
       setQrStatus(String(data.status || 'pending'))
       setQrMessage(String(data.message || '请使用学习通 App 扫描二维码'))
+      // The code is on screen now, so the button must stop reading "生成中".
+      // Leaving this set would also hide the image: the panel only renders it
+      // while `qrLoading` is false.
+      setQrLoading(false)
 
       stopPolling()
       pollRef.current = setInterval(() => {
@@ -170,6 +181,7 @@ export default function useChaoxingQrLogin({ request, onSuccess }) {
     const sessionId = owner.sessionId
     invalidateGeneration()
     setQrCode('')
+    setQrMime('image/jpeg')
     setQrStatus('idle')
     setQrMessage('')
     setQrError('')
@@ -186,6 +198,7 @@ export default function useChaoxingQrLogin({ request, onSuccess }) {
   const logout = useCallback(async () => {
     invalidateGeneration()
     setQrCode('')
+    setQrMime('image/jpeg')
     setQrStatus('idle')
     setQrMessage('')
     setQrError('')
@@ -200,6 +213,7 @@ export default function useChaoxingQrLogin({ request, onSuccess }) {
 
   return {
     qrCode,
+    qrMime,
     qrStatus,
     qrMessage,
     qrError,
