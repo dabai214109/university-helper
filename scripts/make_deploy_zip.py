@@ -60,6 +60,13 @@ FORK_MARKERS = (
     # file containing it can only be this fork's scanner.
     ('backend/app/services/course/chaoxing/qr_login.py', 'cloudscanlogin'),
     ('frontend/src/pages/chaoxing-shared/useChaoxingQrLogin.js', 'qr-login'),
+    # Course queue / recurring schedules / admin history. ASCII needles only, so
+    # the check survives any encoding difference in the archive.
+    ('backend/app/services/course/chaoxing/recurrence.py', 'first_occurrence'),
+    ('backend/app/services/course/chaoxing/task_admission.py', 'RECURRING_TASK_STATUSES'),
+    ('backend/app/api/v1/admin.py', 'admin_learning_records'),
+    ('frontend/src/pages/chaoxing-fanya/components/CourseQueue.jsx', 'chapters_done'),
+    ('frontend/src/pages/admin/LearningRecordsPanel.jsx', 'learning-records'),
 )
 
 
