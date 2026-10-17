@@ -43,13 +43,32 @@ need_docker() {
 # ---------------------------------------------------------------- 旧部署识别
 # 上游部署的镜像是 ghcr.io/sweetcornna/*；本 fork 是本地构建的
 # university-helper-app:fork。容器名两者相同（历史原因），所以必须看镜像。
+# 判断镜像到底是「从 GHCR 拉下来的上游镜像」还是「本地构建的」。
+#
+# 关键点：**镜像名不足以判断来源**。上游的 docker-compose.release.yml 里写的是
+#   image: ghcr.io/sweetcornna/university-helper-app:latest
+# 但用 `docker compose build` 本地构建时，产出的镜像**也叫这个名字**。
+# 所以只看名字会把本地构建误判成「上游镜像」。
+#
+# 可靠依据是 RepoDigests：
+#   · docker pull 下来的镜像 → 有 RepoDigests（repo@sha256:...），因为它来自 registry
+#   · 本地 docker build 的镜像 → RepoDigests 为空，它从未进过 registry
 detect_existing() {
-  local image
+  local image digests
   image="$(docker inspect "$APP_CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || true)"
   if [[ -z "$image" ]]; then
     echo "none"
     return
   fi
+
+  # RepoDigests 非空 = 从 registry 拉取的镜像
+  digests="$(docker inspect "$APP_CONTAINER" --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
+  if [[ "$digests" == "[]" || -z "$digests" ]]; then
+    # 没有 digest：本地构建产物。名字即使是 ghcr.io/... 也无关紧要。
+    echo "fork"
+    return
+  fi
+
   if [[ "$image" == ${UPSTREAM_IMAGE_PREFIX}* ]]; then
     echo "upstream"
   else
@@ -220,14 +239,26 @@ do_backup() {
 # ---------------------------------------------------------------- 主流程
 cmd_status() {
   need_docker
-  local kind
+  local kind image digests
   kind="$(detect_existing)"
+  image="$(docker inspect "$APP_CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo '(无)')"
+  digests="$(docker inspect "$APP_CONTAINER" --format '{{json .RepoDigests}}' 2>/dev/null || echo '[]')"
+
   echo "部署类型： $kind"
   case "$kind" in
     none)     echo "  → 尚未部署" ;;
-    upstream) echo "  → 旧的上游镜像部署（ghcr.io/sweetcornna/*）" ;;
-    fork)     echo "  → 本 fork 的本地构建部署" ;;
+    upstream) echo "  → 从 GHCR 拉取的上游镜像" ;;
+    fork)     echo "  → 本地构建（本 fork）" ;;
   esac
+  echo
+  echo "  app 镜像： $image"
+  if [[ "$digests" == "[]" || -z "$digests" ]]; then
+    echo "  来源判定： 无 RepoDigests → 本地 docker build 产物"
+  else
+    echo "  来源判定： 有 RepoDigests → 来自 registry（docker pull）"
+    echo "             $digests"
+  fi
+  echo
   docker ps -a --filter "name=shuake-easy-learning" \
     --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' || true
 }
