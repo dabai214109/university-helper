@@ -1,0 +1,156 @@
+# 标准部署栈 —— 从本地源码构建，不依赖任何预构建镜像。
+#
+# 一键启动：
+#   docker compose up -d --build
+#
+# 更新（保留数据）：
+#   docker compose up -d --build
+#
+# 与 docker-compose.release.yml 的区别：
+#   - release.yml 拉 ghcr.io/sweetcornna/* 的上游镜像（不含本 fork 的改动）
+#   - 本文件用本地 Dockerfile 构建，构建出来的镜像名带本 fork 的标记
+#
+# 端口：web 暴露在 ${HTTP_BIND_HOST}:${HTTP_PORT}，app/postgres 只在内部网络。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    # 显式命名，便于区分「上游 ghcr.io 镜像」和「本地构建」。
+    # 上游部署的镜像是 ghcr.io/sweetcornna/university-helper-app:<tag>。
+    image: university-helper-app:${UH_LOCAL_TAG:-fork}
+    container_name: shuake-easy-learning-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    environment:
+      MAIN_DB_HOST: postgres
+      MAIN_DB_NAME: main_db
+      MAIN_DB_USER: easylearning
+      MAIN_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MAIN_DB_PORT: 5432
+      SECRET_KEY: ${SECRET_KEY}
+      SHUAKE_COMPAT_SECRET: ${SHUAKE_COMPAT_SECRET:-}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      # 本 fork 必须关闭：版本号与上游一致，开着会一直提示升级到上游
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-false}
+      ENFORCE_HTTPS: "false"
+      ENV: ${ENV:-production}
+      REDIS_URL: ${REDIS_URL:-}
+      # 启动时自动校验/补齐数据库结构（幂等，见 app/db/bootstrap.py）
+      DB_AUTO_BOOTSTRAP: ${DB_AUTO_BOOTSTRAP:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=3); sys.exit(0)\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # 协同式取消需要时间；30s 给正在跑的刷课任务收尾
+    stop_grace_period: 30s
+    networks:
+      - shuake-net
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: university-helper-web:${UH_LOCAL_TAG:-fork}
+    container_name: shuake-easy-learning-web
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${HTTP_BIND_HOST:-0.0.0.0}:${HTTP_PORT:-8080}:80"
+    networks:
+      - shuake-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: shuake-easy-learning-db
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=300"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "effective_cache_size=384MB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "wal_compression=on"
+      - "-c"
+      - "log_min_duration_statement=500ms"
+    environment:
+      POSTGRES_USER: easylearning
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: main_db
+    volumes:
+      # 数据卷。注意：卷名带 compose project 前缀，
+      # 只有用同一个 project 名（默认取目录名）才会复用同一份数据。
+      - shuake-postgres-data:/var/lib/postgresql/data
+      # 仅在「卷为空、首次初始化」时执行；已有数据不会重跑。
+      # 后续结构变更由 app 启动时的 DB_AUTO_BOOTSTRAP 幂等补齐。
+      - ./database:/docker-entrypoint-initdb.d:ro
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-easylearning} -d $${POSTGRES_DB:-main_db}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: '0.75'
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - shuake-net
+
+networks:
+  shuake-net:
+    driver: bridge
+
+volumes:
+  shuake-postgres-data:

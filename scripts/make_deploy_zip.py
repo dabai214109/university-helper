@@ -29,8 +29,12 @@ DEFAULT_OUT = 'uh-deploy-src.zip'
 # Files that decide whether deploy_server.sh tries to download from GitHub.
 # `resolve_repo_root()` (deploy_server.sh:184-201) checks exactly these; when
 # all four exist the script uses the current directory and never downloads.
+# The one-command path (docker-compose.yml + one_command_deploy.sh) needs its
+# own files present too.
 GUARD_FILES = (
     'docker-compose.release.yml',
+    'docker-compose.yml',
+    'scripts/one_command_deploy.sh',
     'database/00-schema.sql',
     'database/02-bootstrap-tenant-template.sh',
     'database/templates/tenant_template.sql',
@@ -132,7 +136,9 @@ def build(out_path: str) -> int:
     if problems:
         print('\nFAILED: %d problem(s): %s' % (len(problems), ', '.join(problems)), file=sys.stderr)
         return 1
-    print('\nAll checks passed. Upload this zip to the server and unzip it, then run:')
+    print('\nAll checks passed. Upload this zip to the server, unzip it into a directory')
+    print('(the archive has no top-level folder), then run ONE of:')
+    print('  bash scripts/one_command_deploy.sh        # standard compose, recommended')
     print('  bash scripts/deploy_server.sh --build --host <SERVER_IP> --admin-email <EMAIL> -y')
     return 0
 
