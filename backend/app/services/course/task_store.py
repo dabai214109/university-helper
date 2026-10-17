@@ -17,7 +17,13 @@ _SENSITIVE_FIELDS: tuple[str, ...] = (
     "user_password",
     "third_party_password",
     "token",
+    "tokens",
     "api_key",
+    # 题库/AI 答题的密钥。`key` 是 AI 智能答题用的，`siliconflow_key` 是
+    # 硅基流动用的 —— 少了这两项，用户填的 API Key 会以**明文**写进
+    # course_task_store.payload，定时任务的凭据尤其危险。
+    "key",
+    "siliconflow_key",
 )
 # Nested containers that may hold credentials. We recurse one level into them.
 _SENSITIVE_CONTAINERS: tuple[str, ...] = ("credentials",)

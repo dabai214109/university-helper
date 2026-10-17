@@ -23,6 +23,12 @@ export default function useTaskConfig() {
 
   const [tikuToken, setTikuToken] = useState('')
 
+  // AI / 题库适配器没有公网默认地址，必须显式提供才能通过后端校验。
+  // 硅基流动有默认地址，只需上面的 key。
+  const [aiEndpoint, setAiEndpoint] = useState('')
+  const [aiModel, setAiModel] = useState('')
+  const [adapterUrl, setAdapterUrl] = useState('')
+
 
   const [coverageThreshold, setCoverageThreshold] = useState(0.9)
 
@@ -62,6 +68,9 @@ export default function useTaskConfig() {
     unopenedStrategy, setUnopenedStrategy,
     tikuProvider, setTikuProvider,
     tikuToken, setTikuToken,
+    aiEndpoint, setAiEndpoint,
+    aiModel, setAiModel,
+    adapterUrl, setAdapterUrl,
     coverageThreshold, setCoverageThreshold,
     correctOptions, setCorrectOptions,
     wrongOptions, setWrongOptions,

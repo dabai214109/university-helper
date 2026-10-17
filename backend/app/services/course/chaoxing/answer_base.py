@@ -10,6 +10,31 @@ from .answer_check import check_answer
 from .answer_utils import _apply_ocr_to_title_if_needed
 
 
+def _merge_judgement_list(raw: object, defaults: list[str]) -> list[str]:
+    """把用户配置的判断题映射**追加**到默认值上，而不是替换默认值。
+
+    题库返回的判断题答案五花八门：既有「对/错」，也有「T/F」「True/False」。
+    如果用户配置整体替换了默认值，`judgement_select` 的精确匹配就会落空，
+    进而 `random.choice()` 随机选一个 —— 表现为「判断题答案随机」。
+    合并后两种写法都能命中；用户配置排在前面，因此优先使用。
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _add(item: str) -> None:
+        text = str(item).strip()
+        if text and text not in seen:
+            seen.add(text)
+            merged.append(text)
+
+    if raw:
+        for part in str(raw).split(","):
+            _add(part)
+    for item in defaults:
+        _add(item)
+    return merged
+
+
 # TODO: 重构此部分代码，将此类改为抽象类，加载题库方法改为静态方法，禁止直接初始化此类
 class Tiku:
     CONFIG_PATH = os.path.join(os.getcwd(), "config.ini")  # TODO: 从运行参数中获取config路径
@@ -90,21 +115,19 @@ class Tiku:
         # 判断题映射表，支持缺省配置。
         # 每个列表独立生效：用户只配置 true_list（或只配置 false_list）时，
         # 应当采用其配置值，另一侧回退到默认，而不是因为没有同时配置而全部丢弃。
+        #
+        # 用户配置是**追加**到默认值上，而不是整体替换。前端默认填「对,正确,是」，
+        # 若整体替换，源码里的 "T"/"True"/"true" 就全部失效；而题库经常返回
+        # "T"/"F"，judgement_select 精确匹配不上就会退化成随机选择。
+        # 合并可同时支持「是/否」和「T/F」两种写法。
         true_raw = conf.get("true_list")
         false_raw = conf.get("false_list")
 
         default_true = ["正确", "对", "T", "True", "true"]
         default_false = ["错误", "错", "F", "False", "false"]
 
-        if true_raw:
-            self.true_list = [s for s in true_raw.split(",") if s] or default_true
-        else:
-            self.true_list = default_true
-
-        if false_raw:
-            self.false_list = [s for s in false_raw.split(",") if s] or default_false
-        else:
-            self.false_list = default_false
+        self.true_list = _merge_judgement_list(true_raw, default_true)
+        self.false_list = _merge_judgement_list(false_raw, default_false)
 
         # 调用自定义题库初始化
         self._init_tiku()

@@ -5,7 +5,7 @@ import CourseQueue from './CourseQueue'
 
 export default function TaskControlSection({
   taskId, taskStatus, loading, isRunning, statusText,
-  startTask, controlTask, controlLoading = {},
+  startTask, controlTask, controlLoading = {}, queuedCount = 0,
 }) {
 
 
@@ -114,6 +114,7 @@ export default function TaskControlSection({
 
 
             disabled={loading || isRunning}
+            title={isRunning ? '当前有任务在运行，需等它结束后再启动' : undefined}
 
 
             className="min-h-[44px] cursor-pointer rounded-xl bg-primary px-6 py-3 text-white disabled:cursor-not-allowed disabled:bg-text-muted"
@@ -122,10 +123,19 @@ export default function TaskControlSection({
           >
 
 
-            {loading ? '启动中...' : '开始刷课'}
+            {loading ? '启动中...' : isRunning ? '等待当前任务结束' : '开始刷课'}
 
 
           </button>
+        )}
+
+
+        {/* 已有任务在跑时，用户仍可以先配好参数、加队列。
+            这里明确告诉他队列还在等，而不是让「开始刷课」静默置灰。 */}
+        {isRunning && !blocksNewTask && queuedCount > 0 && (
+          <p className="flex min-h-[44px] items-center rounded-xl border border-warning/30 bg-warning-surface px-4 text-sm text-warning">
+            队列中 {queuedCount} 门课程待执行 —— 当前任务结束后即可点「开始刷课」启动
+          </p>
         )}
 
 

@@ -4,7 +4,7 @@ import { CARD, getCourseId, getCourseName } from '../utils'
 
 export default function CourseListSection({
   courses, selectedCourses, setSelectedCourses, chapters, expanded,
-  toggleExpand, loadCourses, queuedCourses = [], onConfirmQueue,
+  toggleExpand, loadCourses, queuedCourses = [], onConfirmQueue, onClearQueue,
 }) {
 
 
@@ -137,6 +137,53 @@ export default function CourseListSection({
           确定加入队列
         </button>
       </div>
+
+
+      {/* 确认后、开跑前的队列清单。
+          任务卡片里的「执行队列」只在任务开始后才有数据（后端在
+          _run_task_worker 里才填充 progress.courses），所以这一段是用户
+          点完「确定加入队列」之后唯一能看到「我加了哪些、什么顺序」的地方。 */}
+      {queuedCourses.length > 0 && (
+        <div className="mb-3 rounded-xl border border-primary/25 bg-primary/5 p-3">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-sm font-medium text-text">已加入队列（按执行顺序）</p>
+            <div className="flex items-center gap-3">
+              <span className="font-mono text-xs text-text-muted">{queuedCourses.length} 门</span>
+              {onClearQueue && (
+                <button
+                  type="button"
+                  onClick={onClearQueue}
+                  className="cursor-pointer rounded-md border border-border bg-surface px-2 py-1 text-xs text-text/70 transition-colors hover:bg-surface-hover"
+                >
+                  清空队列
+                </button>
+              )}
+            </div>
+          </div>
+          <ol className="space-y-1">
+            {queuedCourses.map((courseId, index) => (
+              <li
+                key={courseId}
+                className="flex items-center gap-2.5 rounded-lg bg-surface px-3 py-1.5 text-sm"
+              >
+                <span className="inline-grid h-5 w-5 shrink-0 place-items-center rounded-full bg-primary/15 font-mono text-[11px] font-semibold text-primary">
+                  {index + 1}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-text">
+                  {getCourseName(courses.find((course) => getCourseId(course) === courseId) || {}) ||
+                    courseId}
+                </span>
+                <span className="hidden shrink-0 font-mono text-[11px] text-text-muted sm:inline">
+                  {courseId}
+                </span>
+              </li>
+            ))}
+          </ol>
+          <p className="mt-2 text-xs text-text-muted">
+            点击「开始刷课」后，会按上面顺序逐门执行。
+          </p>
+        </div>
+      )}
 
 
       <div className="max-h-80 space-y-2 overflow-y-auto">

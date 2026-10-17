@@ -164,6 +164,30 @@ export default function ChaoxingFanya() {
       return
     }
 
+    // 题库 / AI 答题的必要参数。后端对 AI 和题库适配器做严格 URL 校验，
+    // 缺字段会返回 422；在这里先拦下，用户才知道要填什么。
+    const tikuProviders = Array.isArray(taskConfig.tikuProvider)
+      ? taskConfig.tikuProvider
+      : [taskConfig.tikuProvider]
+    if (tikuProviders.includes('AI')) {
+      if (!taskConfig.aiEndpoint.trim()) {
+        auth.setError('已选择「AI 智能答题」，请填写 AI 接口地址（必须公网 http/https）。')
+        return
+      }
+      if (!taskConfig.aiModel.trim()) {
+        auth.setError('已选择「AI 智能答题」，请填写 AI 模型名（例如 gpt-4o-mini）。')
+        return
+      }
+      if (!taskConfig.tikuToken.trim()) {
+        auth.setError('已选择「AI 智能答题」，请填写 API Key（填在「题库 Token / API Key」）。')
+        return
+      }
+    }
+    if (tikuProviders.includes('TikuAdapter') && !taskConfig.adapterUrl.trim()) {
+      auth.setError('已选择「题库适配器」，请填写适配器地址（必须公网 http/https）。')
+      return
+    }
+
     // Validate schedule inputs
     const isSchedule = taskConfig.scheduleMode === 'scheduled'
     const isRecurring = isSchedule && taskConfig.repeat !== 'once'
@@ -220,7 +244,11 @@ export default function ChaoxingFanya() {
               .map((item) => item.trim())
               .filter(Boolean)
           },
-          submit_mode: taskConfig.submitMode
+          submit_mode: taskConfig.submitMode,
+          // 只在用户真的填了才发，避免空串触发后端的 URL 校验
+          ...(taskConfig.aiEndpoint.trim() ? { endpoint: taskConfig.aiEndpoint.trim() } : {}),
+          ...(taskConfig.aiModel.trim() ? { model: taskConfig.aiModel.trim() } : {}),
+          ...(taskConfig.adapterUrl.trim() ? { url: taskConfig.adapterUrl.trim() } : {})
         },
         notify_config:
           taskConfig.notifyService.trim() && taskConfig.notifyUrl.trim()
@@ -322,6 +350,11 @@ export default function ChaoxingFanya() {
     [toast]
   )
 
+  const clearQueue = useCallback(() => {
+    setQueuedCourses([])
+    toast.success('已清空队列')
+  }, [toast])
+
   // Logging out cancels running tasks server-side, so ask first.
   const handleLogoutChaoxing = useCallback(async () => {
     const confirmed = window.confirm(
@@ -378,6 +411,7 @@ export default function ChaoxingFanya() {
               setSelectedCourses={setSelectedCourses}
               queuedCourses={queuedCourses}
               onConfirmQueue={confirmQueue}
+              onClearQueue={clearQueue}
               chapters={chapters}
               expanded={expanded}
               toggleExpand={toggleExpand}
@@ -401,6 +435,7 @@ export default function ChaoxingFanya() {
               loading={taskExec.loading}
               controlLoading={taskExec.controlLoading}
               isRunning={isRunning}
+              queuedCount={queuedCourses.length}
               statusText={statusText}
               startTask={startTask}
               controlTask={taskExec.controlTask}

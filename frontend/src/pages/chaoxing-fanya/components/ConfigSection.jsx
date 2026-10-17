@@ -127,6 +127,12 @@ export default function ConfigSection({
   setTikuProvider,
   tikuToken,
   setTikuToken,
+  aiEndpoint,
+  setAiEndpoint,
+  aiModel,
+  setAiModel,
+  adapterUrl,
+  setAdapterUrl,
   coverageThreshold,
   setCoverageThreshold,
   correctOptions,
@@ -161,6 +167,13 @@ export default function ConfigSection({
   // Recurring runs are driven by a wall-clock time, not an absolute datetime,
   // so the one-shot pickers are replaced rather than merely supplemented.
   const isRecurring = repeat !== 'once'
+
+  // 这两个 provider 没有公网默认地址，后端会强制校验 endpoint/url，
+  // 不填就直接 422 —— 所以只在选中时展示对应输入框。
+  const selectedProviders = Array.isArray(tikuProvider) ? tikuProvider : [tikuProvider]
+  const needsAiEndpoint = selectedProviders.includes('AI')
+  const needsAdapterUrl = selectedProviders.includes('TikuAdapter')
+
   return (
     <section className={`${CARD} space-y-6`}>
       {/* Everyday playback settings */}
@@ -398,16 +411,74 @@ export default function ConfigSection({
 
           <div>
             <label htmlFor="fanya-tiku-token" className="mb-1 block text-sm font-medium text-text/80">
-              题库 Token（可选）
+              题库 Token / API Key（可选）
             </label>
             <input
               id="fanya-tiku-token"
               className="w-full rounded-xl border border-border bg-surface px-4 py-3"
-              placeholder="部分题库 / AI 服务需要填写"
+              placeholder="言溪 / Like 填题库 Token；硅基流动 / AI 填 API Key"
               value={tikuToken}
               onChange={(event) => setTikuToken(event.target.value)}
             />
+            <p className="mt-1 text-xs text-text-muted">
+              同一个框会按你选的题库自动分发到对应位置，不需要分开填。
+            </p>
           </div>
+
+          {/* AI / 题库适配器没有公网默认地址，必须显式填写，否则后端返回 422。
+              这两个字段只在选中对应 provider 时出现，避免干扰普通用户。 */}
+          {needsAiEndpoint && (
+            <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 space-y-3">
+              <p className="text-xs text-text/70">
+                选中的「AI 智能答题」需要接口地址 + 模型名，Key 用上面的输入框。
+                地址必须是公网 http(s)，形如 <code className="rounded bg-surface-hover px-1">https://api.openai.com/v1/chat/completions</code>。
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="fanya-ai-endpoint" className="mb-1 block text-sm font-medium text-text/80">
+                    AI 接口地址 <span className="text-xs text-primary">*必填</span>
+                  </label>
+                  <input
+                    id="fanya-ai-endpoint"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    placeholder="https://api.openai.com/v1/chat/completions"
+                    value={aiEndpoint}
+                    onChange={(event) => setAiEndpoint(event.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="fanya-ai-model" className="mb-1 block text-sm font-medium text-text/80">
+                    AI 模型名 <span className="text-xs text-primary">*必填</span>
+                  </label>
+                  <input
+                    id="fanya-ai-model"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    placeholder="gpt-4o-mini"
+                    value={aiModel}
+                    onChange={(event) => setAiModel(event.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {needsAdapterUrl && (
+            <div className="rounded-xl border border-primary/25 bg-primary/5 p-3">
+              <label htmlFor="fanya-adapter-url" className="mb-1 block text-sm font-medium text-text/80">
+                题库适配器地址 <span className="text-xs text-primary">*必填</span>
+              </label>
+              <input
+                id="fanya-adapter-url"
+                className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                placeholder="https://your-tiku-adapter.example.com/api/search"
+                value={adapterUrl}
+                onChange={(event) => setAdapterUrl(event.target.value)}
+              />
+              <p className="mt-1 text-xs text-text-muted">
+                必须是公网 http(s) 地址；指向内网或 localhost 会被后端拒绝。
+              </p>
+            </div>
+          )}
 
           <div className="space-y-2">
             <label htmlFor="fanya-coverage" className="text-sm font-medium text-text/80">

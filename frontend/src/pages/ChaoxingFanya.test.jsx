@@ -109,7 +109,7 @@ const selectCourseAndStart = async () => {
   await user.click(screen.getByRole('button', { name: '选择课程' }))
   // Ticking a box only stages the selection; the queue is committed explicitly.
   await user.click(screen.getByRole('button', { name: '确定加入队列' }))
-  const startButton = screen.getByRole('button', { name: '开始刷课' })
+  const startButton = screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ })
   await user.click(startButton)
 }
 
@@ -136,7 +136,7 @@ describe('ChaoxingFanya start task loading state', () => {
 
     await selectCourseAndStart()
 
-    const startButton = screen.getByRole('button', { name: '开始刷课' })
+    const startButton = screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ })
     await waitFor(() => expect(startButton).toBeDisabled())
     expect(screen.queryByText('启动中...')).not.toBeInTheDocument()
   })
@@ -146,7 +146,7 @@ describe('ChaoxingFanya start task loading state', () => {
 
     await selectCourseAndStart()
 
-    await waitFor(() => expect(screen.getByRole('button', { name: '开始刷课' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ })).toBeEnabled())
     expect(screen.queryByText('启动中...')).not.toBeInTheDocument()
   })
 
@@ -155,7 +155,7 @@ describe('ChaoxingFanya start task loading state', () => {
 
     await selectCourseAndStart()
 
-    await waitFor(() => expect(screen.getByRole('button', { name: '开始刷课' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ })).toBeEnabled())
     expect(screen.queryByText('启动中...')).not.toBeInTheDocument()
     expect(mocks.auth.setError).toHaveBeenCalledWith('network failure')
   })
@@ -190,7 +190,7 @@ describe('ChaoxingFanya start task loading state', () => {
     await waitFor(() => expect(screen.getByTestId('selected-courses')).toHaveTextContent(expectedSelection))
 
     if (expectedSelection) {
-      await user.click(screen.getByRole('button', { name: '开始刷课' }))
+      await user.click(screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ }))
       await waitFor(() => expect(mocks.auth.callApi).toHaveBeenCalledWith(
         '/course/start',
         expect.objectContaining({
@@ -201,7 +201,7 @@ describe('ChaoxingFanya start task loading state', () => {
       expect(startBody.course_ids).toEqual([expectedSelection])
       expect(startBody.course_ids).not.toContain('course-a')
     } else {
-      await user.click(screen.getByRole('button', { name: '开始刷课' }))
+      await user.click(screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ }))
       expect(mocks.auth.callApi).not.toHaveBeenCalledWith('/course/start', expect.anything())
     }
   })
@@ -214,7 +214,7 @@ describe('ChaoxingFanya start task loading state', () => {
     const user = userEvent.setup()
     render(<ChaoxingFanya />)
     await user.click(screen.getByRole('button', { name: '选择课程' }))
-    await user.click(screen.getByRole('button', { name: '开始刷课' }))
+    await user.click(screen.getByRole('button', { name: /开始刷课|等待当前任务结束/ }))
 
     expect(mocks.auth.setError).toHaveBeenCalledWith('请先点击「确定加入队列」再开始刷课。')
     expect(mocks.auth.callApi).not.toHaveBeenCalledWith('/course/start', expect.anything())
