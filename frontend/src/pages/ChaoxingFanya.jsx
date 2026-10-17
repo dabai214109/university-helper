@@ -178,8 +178,8 @@ export default function ChaoxingFanya() {
         auth.setError('已选择「AI 智能答题」，请填写 AI 模型名（例如 gpt-4o-mini）。')
         return
       }
-      if (!taskConfig.tikuToken.trim()) {
-        auth.setError('已选择「AI 智能答题」，请填写 API Key（填在「题库 Token / API Key」）。')
+      if (!taskConfig.aiApiKey.trim()) {
+        auth.setError('已选择「AI 智能答题」，请填写 AI API Key（在 AI 区域）。')
         return
       }
     }
@@ -248,6 +248,8 @@ export default function ChaoxingFanya() {
           // 只在用户真的填了才发，避免空串触发后端的 URL 校验
           ...(taskConfig.aiEndpoint.trim() ? { endpoint: taskConfig.aiEndpoint.trim() } : {}),
           ...(taskConfig.aiModel.trim() ? { model: taskConfig.aiModel.trim() } : {}),
+          // AI 的 Key 单独发，避免和言溪 Token 抢同一个字段
+          ...(taskConfig.aiApiKey.trim() ? { key: taskConfig.aiApiKey.trim() } : {}),
           ...(taskConfig.adapterUrl.trim() ? { url: taskConfig.adapterUrl.trim() } : {})
         },
         notify_config:
@@ -308,7 +310,9 @@ export default function ChaoxingFanya() {
       const resultStatus = String(resp.status || '').toLowerCase()
       const isRecurringResult = String(resp.schedule?.repeat || 'once') !== 'once'
       let startMsg
-      if (resultStatus === 'recurring') {
+      if (resultStatus === 'queued') {
+        startMsg = `已加入队列：${resp.task_id}（当前任务结束后自动开始）`
+      } else if (resultStatus === 'recurring') {
         startMsg = `周期任务已创建：${resp.task_id}（${taskConfig.repeat === 'daily' ? '每天' : '隔天'} ${taskConfig.timeOfDay}）`
       } else if (resultStatus === 'scheduled') {
         startMsg = isRecurringResult
@@ -318,7 +322,11 @@ export default function ChaoxingFanya() {
         startMsg = `任务已创建：${resp.task_id}`
       }
       taskExec.appendLogs([{ timestamp: new Date().toISOString(), level: 'success', message: startMsg }])
-      if (resultStatus === 'recurring') {
+      if (resultStatus === 'queued') {
+        toast.success('已加入队列，当前任务结束后会自动开始')
+        // 队列已提交给后端，本地这份可以清掉，避免误导「还没开始」
+        setQueuedCourses([])
+      } else if (resultStatus === 'recurring') {
         toast.success('周期任务已创建，将按设定时间反复执行')
       } else if (resultStatus === 'scheduled') {
         toast.success('已加入定时队列')

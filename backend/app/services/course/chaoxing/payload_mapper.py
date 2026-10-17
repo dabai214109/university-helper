@@ -28,13 +28,18 @@ def normalize_tiku_config(raw_config: Any) -> dict[str, Any]:
     if token_text:
         config["tokens"] = token_text
 
-    # 前端只有一个「题库 Token」输入框，但各个 provider 读的是不同的键：
-    #   言溪 / Like      -> tokens
-    #   硅基流动          -> siliconflow_key
-    #   AI 智能答题       -> key
-    # 不路由的话，用户把硅基流动的 key 填进「Token」，到了引擎里
-    # self._conf["siliconflow_key"] 直接 KeyError，provider 被静默禁用。
-    # 只有用户没显式提供对应键时才路由，避免覆盖高级用户的手工配置。
+    # 各 provider 读的是不同的键：
+    #   言溪 / Like  -> tokens
+    #   硅基流动      -> siliconflow_key
+    #   AI 智能答题   -> key
+    #
+    # 前端现在把 AI 的 Key 单独发在 `key` 里（与言溪的 Token 分开），所以这里
+    # 只做**兜底路由**：只有当对应的键没被显式提供时，才拿 `token` 顶上。
+    # 这样两种用法都成立 ——
+    #   · 只填一个框的老用法：token 也喂给硅基流动/AI
+    #   · 分开填的新用法：显式的 key / siliconflow_key 优先，不被覆盖
+    # 不路由会怎样：硅基流动读 self._conf["siliconflow_key"] 直接 KeyError，
+    # provider 被静默禁用。
     if token_text:
         provider_names = [n.strip() for n in str(config.get("provider") or "").split(",") if n.strip()]
         if "SiliconFlow" in provider_names and not config.get("siliconflow_key"):

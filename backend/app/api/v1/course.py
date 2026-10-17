@@ -25,7 +25,10 @@ from app.services.course.chaoxing.recurrence import (
     parse_time_of_day,
 )
 from app.services.course.chaoxing.signin import signin_manager
-from app.services.course.chaoxing.task_admission import TaskAdmissionError
+from app.services.course.chaoxing.task_admission import (
+    TaskAdmissionError,
+    TaskAlreadyActiveError,
+)
 from app.services.course.zhihuishu.adapter import (
     TASK_CONFLICT_DETAIL,
     ZhihuishuAdapter,
@@ -331,13 +334,41 @@ async def start_course_learning(
             payload["time_of_day"] = request.time_of_day
             payload["anchor_date"] = request.anchor_date
             payload["max_duration_min"] = request.max_duration_min
-        task_id = await _run_blocking(
-            learning_manager.start_task,
-            user_id=user_id,
-            payload=payload,
-        )
-        if is_scheduled:
+        # 已有活跃任务时不要直接 409：把新任务挂到它的链尾，等它结束后自动开始。
+        # 这是用户明确要的行为（「继续添加队列任务到现有任务之后」），而且保留
+        # 「同时只跑一个」的约束，避免同账号并发触犯风控。
+        queued = False
+        try:
+            task_id = await _run_blocking(
+                learning_manager.start_task,
+                user_id=user_id,
+                payload=payload,
+            )
+        except TaskAlreadyActiveError:
+            queued_payload = dict(payload)
+            queued_payload["queue_behind"] = True
+            task_id = await _run_blocking(
+                learning_manager.start_task,
+                user_id=user_id,
+                payload=queued_payload,
+            )
+            queued = True
+        if is_scheduled and not queued:
             return await get_course_status(task_id=task_id, current_user=current_user)
+        if queued:
+            progress = {
+                "total": len(request.course_ids or []),
+                "completed": 0,
+                "failed": 0,
+                "current": 0,
+            }
+            return CourseStatusResponse(
+                status="queued",
+                message="已加入队列，当前任务结束后自动开始",
+                progress=progress,
+                task_id=task_id,
+                current_task="queued",
+            )
         progress = {
             "total": len(request.course_ids or []),
             "completed": 0,

@@ -381,3 +381,144 @@ def test_cancel_all_for_user_is_a_noop_for_an_unknown_user(monkeypatch):
 
     assert manager.cancel_all_for_user("nobody") == 0
     assert manager.cancel_all_for_user("") == 0
+
+
+# ── 任务级链式队列（已有任务在跑时排队） ──────────────────────────────────────
+
+
+def _running_task(manager, task_id="t1", user="u1"):
+    manager._tasks[task_id] = {
+        "task_id": task_id,
+        "user_id": user,
+        "platform": "chaoxing",
+        "status": "running",
+        "message": "",
+        "current_task": "",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+    }
+    return manager._tasks[task_id]
+
+
+def test_queue_behind_attaches_to_the_active_task(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager)
+
+    queued_id = manager.start_task(
+        "u1",
+        {"platform": "chaoxing", "course_ids": ["1_2_3"], "queue_behind": True},
+    )
+
+    chain = manager._tasks["t1"].get("queued_next")
+    assert isinstance(chain, list) and len(chain) == 1
+    assert chain[0]["task_id"] == queued_id
+    # 排队项本身还没有任务记录（它还不是一个 running task）
+    assert queued_id not in manager._tasks
+
+
+def test_queue_behind_appends_in_order(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager)
+
+    first = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+    second = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    chain = manager._tasks["t1"]["queued_next"]
+    assert [entry["task_id"] for entry in chain] == [first, second]
+
+
+def test_queue_behind_falls_back_when_the_anchor_finishes_mid_flight(monkeypatch):
+    """前端以为有任务在跑、点了排队，但那一刻它刚好结束了。
+
+    这时不能报错（用户的任务会凭空消失），必须降级成普通启动。
+    用一个已结束的任务模拟「调度前恰好完成」的窗口。
+    """
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    # t1 已进入终态 —— 队列找不到可挂靠的活跃任务。
+    manager._tasks["t1"]["status"] = "completed"
+    monkeypatch.setattr(manager, "_run_task_worker_guarded", lambda *a, **k: None)
+
+    task_id = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    assert task_id in manager._tasks, "找不到活跃任务时必须降级为普通启动"
+    assert manager._tasks[task_id]["status"] == "pending"
+
+
+def test_finishing_a_task_starts_the_next_queued(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+
+    queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+    assert manager._tasks["t1"]["queued_next"][0]["task_id"] == queued
+
+    started: list[str] = []
+    real_start = manager.start_task
+
+    def spy(uid, payload):
+        started.append(uid)
+        # 不要再走排队分支，否则会因为 t1 仍存在而再次入队
+        payload = {k: v for k, v in payload.items() if k != "queue_behind"}
+        return real_start(uid, payload)
+
+    monkeypatch.setattr(manager, "start_task", spy)
+    manager._start_next_queued("t1", "u1")
+
+    assert started == ["u1"], "队列里的任务应该被启动一次"
+    # 队列已消费
+    assert manager._tasks["t1"]["queued_next"] == []
+
+
+def test_finishing_a_task_with_empty_queue_does_nothing(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    started = []
+    monkeypatch.setattr(manager, "start_task", lambda uid, p: started.append(1) or "x")
+
+    manager._start_next_queued("t1", "u1")
+
+    assert started == []
+
+
+def test_queue_entries_survive_persistence(monkeypatch):
+    """排队信息是存在前一个任务上的，跟着它一起落库/恢复。"""
+    manager = _make_manager()
+    saved: list[dict] = []
+    monkeypatch.setattr(lm.task_store, "upsert_task",
+                        lambda kind, payload: saved.append(payload) or True)
+    _running_task(manager, "t1")
+
+    manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    assert any(p.get("queued_next") for p in saved), "排队项必须写进持久化快照"
+
+
+def test_non_queued_start_still_rejects_when_busy(monkeypatch):
+    """不要求排队的普通启动，仍然保持 409 语义。"""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+
+    try:
+        manager.start_task("u1", {"platform": "chaoxing"})
+    except Exception as exc:
+        assert type(exc).__name__ == "TaskAlreadyActiveError"
+    else:  # pragma: no cover
+        raise AssertionError("expected TaskAlreadyActiveError")
+
+
+def test_queued_payload_drops_the_queue_flag(monkeypatch):
+    """queue_behind 只是准入提示，不能传给 worker 当作真实参数。"""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+
+    manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True, "speed": 1.5})
+
+    entry = manager._tasks["t1"]["queued_next"][0]
+    assert entry["payload"]["speed"] == 1.5

@@ -131,6 +131,8 @@ export default function ConfigSection({
   setAiEndpoint,
   aiModel,
   setAiModel,
+  aiApiKey,
+  setAiApiKey,
   adapterUrl,
   setAdapterUrl,
   coverageThreshold,
@@ -411,17 +413,17 @@ export default function ConfigSection({
 
           <div>
             <label htmlFor="fanya-tiku-token" className="mb-1 block text-sm font-medium text-text/80">
-              题库 Token / API Key（可选）
+              题库 Token（可选）
             </label>
             <input
               id="fanya-tiku-token"
               className="w-full rounded-xl border border-border bg-surface px-4 py-3"
-              placeholder="言溪 / Like 填题库 Token；硅基流动 / AI 填 API Key"
+              placeholder="言溪题库 / Like 题库的 Token；多个用逗号分隔"
               value={tikuToken}
               onChange={(event) => setTikuToken(event.target.value)}
             />
             <p className="mt-1 text-xs text-text-muted">
-              同一个框会按你选的题库自动分发到对应位置，不需要分开填。
+              只给「言溪题库 / Like 题库」用。AI 的 Key 填在下面的 AI 区。
             </p>
           </div>
 
@@ -434,7 +436,7 @@ export default function ConfigSection({
                 地址必须是公网 http(s)，形如 <code className="rounded bg-surface-hover px-1">https://api.openai.com/v1/chat/completions</code>。
               </p>
               <div className="grid gap-3 sm:grid-cols-2">
-                <div>
+                <div className="sm:col-span-2">
                   <label htmlFor="fanya-ai-endpoint" className="mb-1 block text-sm font-medium text-text/80">
                     AI 接口地址 <span className="text-xs text-primary">*必填</span>
                   </label>
@@ -456,6 +458,19 @@ export default function ConfigSection({
                     placeholder="gpt-4o-mini"
                     value={aiModel}
                     onChange={(event) => setAiModel(event.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="fanya-ai-key" className="mb-1 block text-sm font-medium text-text/80">
+                    AI API Key <span className="text-xs text-primary">*必填</span>
+                  </label>
+                  <input
+                    id="fanya-ai-key"
+                    type="password"
+                    className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                    placeholder="sk-..."
+                    value={aiApiKey}
+                    onChange={(event) => setAiApiKey(event.target.value)}
                   />
                 </div>
               </div>

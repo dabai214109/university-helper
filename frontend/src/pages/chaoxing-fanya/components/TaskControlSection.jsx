@@ -99,42 +99,23 @@ export default function TaskControlSection({
 
         {!blocksNewTask && (
           <button
-
-
             type="button"
-
-
             onClick={() => {
-
-
               void startTask()
-
-
             }}
-
-
-            disabled={loading || isRunning}
-            title={isRunning ? '当前有任务在运行，需等它结束后再启动' : undefined}
-
-
+            disabled={loading}
             className="min-h-[44px] cursor-pointer rounded-xl bg-primary px-6 py-3 text-white disabled:cursor-not-allowed disabled:bg-text-muted"
-
-
           >
-
-
-            {loading ? '启动中...' : isRunning ? '等待当前任务结束' : '开始刷课'}
-
-
+            {loading ? '启动中...' : isRunning ? '加入队列（当前任务结束后执行）' : '开始刷课'}
           </button>
         )}
 
 
-        {/* 已有任务在跑时，用户仍可以先配好参数、加队列。
-            这里明确告诉他队列还在等，而不是让「开始刷课」静默置灰。 */}
+        {/* 已有任务在跑时，按钮变成「加入队列」：后端会把它挂到当前任务的链尾，
+            前一个结束后自动开始。这里说清队列里排了什么。 */}
         {isRunning && !blocksNewTask && queuedCount > 0 && (
           <p className="flex min-h-[44px] items-center rounded-xl border border-warning/30 bg-warning-surface px-4 text-sm text-warning">
-            队列中 {queuedCount} 门课程待执行 —— 当前任务结束后即可点「开始刷课」启动
+            已排队 {queuedCount} 门课程 —— 当前任务结束后会自动开始，无需再来点
           </p>
         )}
 

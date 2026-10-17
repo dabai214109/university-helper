@@ -27,6 +27,9 @@ export default function useTaskConfig() {
   // 硅基流动有默认地址，只需上面的 key。
   const [aiEndpoint, setAiEndpoint] = useState('')
   const [aiModel, setAiModel] = useState('')
+  // AI 的 Key 单独一个框：它和言溪的 Token 不是同一个东西，
+  // 共用一个框会让「言溪 + AI 兜底」这个组合无法配置。
+  const [aiApiKey, setAiApiKey] = useState('')
   const [adapterUrl, setAdapterUrl] = useState('')
 
 
@@ -70,6 +73,7 @@ export default function useTaskConfig() {
     tikuToken, setTikuToken,
     aiEndpoint, setAiEndpoint,
     aiModel, setAiModel,
+    aiApiKey, setAiApiKey,
     adapterUrl, setAdapterUrl,
     coverageThreshold, setCoverageThreshold,
     correctOptions, setCorrectOptions,

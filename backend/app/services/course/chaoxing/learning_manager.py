@@ -157,6 +157,16 @@ class ChaoxingLearningManager:
         is_scheduled = (
             isinstance(schedule_start_at, str) and schedule_start_at.strip()
         ) or is_recurring
+        # 链式排队：如果该用户已有活跃任务，新任务不是报 409，而是挂到链尾，
+        # 等前一个结束后自动开始。chaoxing_learning 的单一活跃约束保留
+        # （同时只跑一个），只是把「被拒绝」改成「排队」。
+        if (payload or {}).get("queue_behind"):
+            queued_id = self._enqueue_behind_active(normalized_user_id, payload, repeat=repeat)
+            if queued_id is not None:
+                return queued_id
+            # 没有活跃任务了（通常是被竞争掉的）→ 走下面的普通启动路径。
+            payload = {k: v for k, v in (payload or {}).items() if k != "queue_behind"}
+
         with self._lock:
             cleanup_task_records(self._tasks)
             # A recurring template is NOT active, so it does not block the user
@@ -396,6 +406,138 @@ class ChaoxingLearningManager:
         }
         self._tasks[child_id] = child
         return child_id
+
+    def _enqueue_behind_active(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        repeat: str,
+    ) -> str | None:
+        """把新任务挂到该用户当前活跃任务的链尾，返回新任务 id（无活跃任务时返回 None）。
+
+        为什么不直接并行跑：同一账号并发学习会触发学习通风控，而且会让
+        「一个用户一个活跃任务」的既有约束失效。所以这里保持串行，只是把
+        「拒绝」换成「排队」：前一个任务结束时，worker 的收尾逻辑会把链尾
+        的这个任务拉起来。
+
+        队列信息存在**前一个任务的** `queued_next` 字段里，跟着那个任务一起
+        持久化 —— 重启后恢复任务时，排队项也一起回来。
+        """
+        now = _utc_now_iso()
+        child_id = uuid4().hex
+
+        with self._lock:
+            cleanup_task_records(self._tasks)
+            # 找到该用户当前活跃/定时的任务，作为链表头。
+            anchor = None
+            for task in self._tasks.values():
+                if str(task.get("user_id") or "").strip() != user_id:
+                    continue
+                status = task.get("status")
+                if is_active_status(status) or is_recurring_status(status):
+                    anchor = task
+                    break
+
+            if anchor is None:
+                # 竞争：调用方看到有活跃任务，但到这一步它已经结束了。
+                # 这不是错误 —— 直接当普通首任务启动，否则用户的任务会凭空消失。
+                # 返回 None 让调用方回退。
+                return None
+
+            queue_entry: dict[str, Any] = {
+                "task_id": child_id,
+                "payload": dict(payload or {}),
+                "repeat": repeat,
+                "enqueued_at": now,
+            }
+            chain = anchor.get("queued_next")
+            if not isinstance(chain, list):
+                chain = []
+            chain.append(queue_entry)
+            anchor["queued_next"] = chain
+            anchor["updated_at"] = now
+            persist_request = self._prepare_persist_locked(anchor)
+
+        if persist_request:
+            self._persist_task_state(*persist_request)
+
+        self._append_task_log(
+            anchor.get("task_id") or "",
+            f"Task queued behind this one (position {len(chain)}): {child_id}",
+            "info",
+        )
+        return child_id
+
+    def _start_next_queued(self, task_id: str, user_id: str) -> None:
+        """当前任务结束时，把链尾的排队任务拉起来。
+
+        调用点在 `_run_task_worker_guarded` 的 finally，即该任务进入终态之后。
+        只启动**第一个**，其余的继续挂在它自己的链上 —— 这样天然是 FIFO，
+        而且每个排队项都会在启动前重新走一遍准入检查（用户可能中途取消了）。
+        """
+        next_entry: dict[str, Any] | None = None
+
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return
+            if str(task.get("user_id") or "").strip() != user_id:
+                return
+            chain = task.get("queued_next")
+            if not isinstance(chain, list) or not chain:
+                return
+            # pop 第一个，剩下的留在原任务上给下一个用（移动到新任务）
+            next_entry = chain.pop(0)
+            task["queued_next"] = chain
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+
+        if not next_entry:
+            return
+        queued_payload = next_entry.get("payload") or {}
+        if not isinstance(queued_payload, dict):
+            return
+        # 排队项自己可能还带着后继（用户连加多个），先摘出来交给新任务
+        remaining: list[dict[str, Any]] = []
+        with self._lock:
+            src = self._tasks.get(task_id)
+            if src is not None:
+                leftover = src.get("queued_next")
+                if isinstance(leftover, list):
+                    remaining = list(leftover)
+
+        payload = dict(queued_payload)
+        payload.pop("queue_behind", None)
+
+        try:
+            new_task_id = self.start_task(user_id, payload)
+        except TaskAlreadyActiveError:
+            logger.warning(
+                "queued task could not start (another task became active): user=%s", user_id
+            )
+            return
+        except Exception:
+            logger.exception("queued task failed to start: user=%s", user_id)
+            return
+
+        if remaining:
+            with self._lock:
+                new_task = self._tasks.get(new_task_id)
+                if new_task is not None:
+                    new_task["queued_next"] = remaining
+                    new_task["updated_at"] = _utc_now_iso()
+                    pr = self._prepare_persist_locked(new_task)
+                else:  # pragma: no cover - defensive
+                    pr = None
+            if pr:
+                self._persist_task_state(*pr)
+
+        self._append_task_log(
+            new_task_id, f"Started from queue (behind {task_id})", "info"
+        )
 
     def list_tasks(self, user_id: str) -> list[dict[str, Any]]:
         self._ensure_tasks_loaded_for_user(user_id)
@@ -1467,6 +1609,14 @@ class ChaoxingLearningManager:
             logger.exception("Chaoxing learning task crashed: task_id=%s user_id=%s", task_id, user_id)
             message = f"{UNEXPECTED_WORKER_ERROR_PREFIX}: {exc}"
             self._fail_task(task_id, message)
+        finally:
+            # 任务进入终态后，把排队中的下一个拉起来。放在 finally 里，是为了
+            # 让「正常结束」「被取消」「异常失败」三种收尾都能继续跑队列 ——
+            # 用户排了三个任务，第一个失败不该让后两个永远不动。
+            try:
+                self._start_next_queued(task_id, user_id)
+            except Exception:  # pragma: no cover - 队列启动失败不应影响任务本身
+                logger.exception("failed to start the next queued task: task_id=%s", task_id)
 
     def _select_courses(self, all_courses: list[dict[str, Any]], selectors: list[str]) -> list[dict[str, Any]]:
         """Resolve selectors to courses, preserving the caller's order (FIFO).
