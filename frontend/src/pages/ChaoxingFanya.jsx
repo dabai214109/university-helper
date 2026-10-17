@@ -187,6 +187,11 @@ export default function ChaoxingFanya() {
       auth.setError('已选择「题库适配器」，请填写适配器地址（必须公网 http/https）。')
       return
     }
+    // 硅基流动的地址/模型有默认值，但 Key 没有 —— 缺了会被静默禁用。
+    if (tikuProviders.includes('SiliconFlow') && !taskConfig.siliconFlowKey.trim()) {
+      auth.setError('已选择「硅基流动」，请填写硅基流动 API Key。')
+      return
+    }
 
     // Validate schedule inputs
     const isSchedule = taskConfig.scheduleMode === 'scheduled'
@@ -250,6 +255,10 @@ export default function ChaoxingFanya() {
           ...(taskConfig.aiModel.trim() ? { model: taskConfig.aiModel.trim() } : {}),
           // AI 的 Key 单独发，避免和言溪 Token 抢同一个字段
           ...(taskConfig.aiApiKey.trim() ? { key: taskConfig.aiApiKey.trim() } : {}),
+          // 硅基流动的 Key 也是独立字段（引擎读 siliconflow_key）
+          ...(taskConfig.siliconFlowKey.trim()
+            ? { siliconflow_key: taskConfig.siliconFlowKey.trim() }
+            : {}),
           ...(taskConfig.adapterUrl.trim() ? { url: taskConfig.adapterUrl.trim() } : {})
         },
         notify_config:

@@ -133,6 +133,8 @@ export default function ConfigSection({
   setAiModel,
   aiApiKey,
   setAiApiKey,
+  siliconFlowKey,
+  setSiliconFlowKey,
   adapterUrl,
   setAdapterUrl,
   coverageThreshold,
@@ -175,6 +177,11 @@ export default function ConfigSection({
   const selectedProviders = Array.isArray(tikuProvider) ? tikuProvider : [tikuProvider]
   const needsAiEndpoint = selectedProviders.includes('AI')
   const needsAdapterUrl = selectedProviders.includes('TikuAdapter')
+  // 硅基流动只要一个 Key：endpoint/model 在引擎里都有默认值
+  // （siliconflow.py: api_endpoint 默认官方地址，model 默认 DeepSeek-V3）。
+  // 但 Key 没有默认值，缺了它 provider 会 KeyError 被静默禁用 ——
+  // 所以必须给它一个输入框。
+  const needsSiliconFlowKey = selectedProviders.includes('SiliconFlow')
 
   return (
     <section className={`${CARD} space-y-6`}>
@@ -432,7 +439,7 @@ export default function ConfigSection({
           {needsAiEndpoint && (
             <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 space-y-3">
               <p className="text-xs text-text/70">
-                选中的「AI 智能答题」需要接口地址 + 模型名，Key 用上面的输入框。
+                选中的「AI 智能答题」需要接口地址 + 模型名 + Key。
                 地址必须是公网 http(s)，形如 <code className="rounded bg-surface-hover px-1">https://api.openai.com/v1/chat/completions</code>。
               </p>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -491,6 +498,26 @@ export default function ConfigSection({
               />
               <p className="mt-1 text-xs text-text-muted">
                 必须是公网 http(s) 地址；指向内网或 localhost 会被后端拒绝。
+              </p>
+            </div>
+          )}
+
+          {needsSiliconFlowKey && (
+            <div className="rounded-xl border border-primary/25 bg-primary/5 p-3">
+              <label htmlFor="fanya-siliconflow-key" className="mb-1 block text-sm font-medium text-text/80">
+                硅基流动 API Key <span className="text-xs text-primary">*必填</span>
+              </label>
+              <input
+                id="fanya-siliconflow-key"
+                type="password"
+                className="w-full rounded-xl border border-border bg-surface px-4 py-3"
+                placeholder="sk-..."
+                value={siliconFlowKey}
+                onChange={(event) => setSiliconFlowKey(event.target.value)}
+              />
+              <p className="mt-1 text-xs text-text-muted">
+                接口地址和模型名已内置默认值（DeepSeek-V3），只需填 Key。
+                在硅基流动控制台「API 密钥」里创建。
               </p>
             </div>
           )}

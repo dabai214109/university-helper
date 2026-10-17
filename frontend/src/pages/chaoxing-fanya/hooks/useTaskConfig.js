@@ -30,6 +30,8 @@ export default function useTaskConfig() {
   // AI 的 Key 单独一个框：它和言溪的 Token 不是同一个东西，
   // 共用一个框会让「言溪 + AI 兜底」这个组合无法配置。
   const [aiApiKey, setAiApiKey] = useState('')
+  // 硅基流动只有 Key 需要填（地址和模型有内置默认值）
+  const [siliconFlowKey, setSiliconFlowKey] = useState('')
   const [adapterUrl, setAdapterUrl] = useState('')
 
 
@@ -74,6 +76,7 @@ export default function useTaskConfig() {
     aiEndpoint, setAiEndpoint,
     aiModel, setAiModel,
     aiApiKey, setAiApiKey,
+    siliconFlowKey, setSiliconFlowKey,
     adapterUrl, setAdapterUrl,
     coverageThreshold, setCoverageThreshold,
     correctOptions, setCorrectOptions,

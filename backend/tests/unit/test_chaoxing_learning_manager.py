@@ -142,3 +142,50 @@ def test_task_store_encrypts_ai_keys():
 
     for field in ("key", "siliconflow_key", "tokens"):
         assert field in _SENSITIVE_FIELDS, f"{field} 必须加进敏感字段清单"
+
+
+def test_explicit_siliconflow_key_is_preserved():
+    """前端现在单独发 siliconflow_key，mapper 不能把它改掉。"""
+    normalized = normalize_tiku_config(
+        {"provider": "SiliconFlow", "siliconflow_key": "sk-explicit", "token": ""}
+    )
+
+    assert normalized["siliconflow_key"] == "sk-explicit"
+
+
+def test_siliconflow_key_survives_alongside_a_tiku_token():
+    """「言溪 Token + 硅基流动 Key」这个组合必须两个都保留。"""
+    normalized = normalize_tiku_config(
+        {
+            "provider": "TikuYanxi,SiliconFlow",
+            "token": "yanxi-token",
+            "siliconflow_key": "sk-sf",
+        }
+    )
+
+    assert normalized["tokens"] == "yanxi-token"
+    assert normalized["siliconflow_key"] == "sk-sf"
+
+
+def test_ai_key_and_tiku_token_are_independent():
+    """AI 的 key 与言溪的 token 是两个不同的密钥，不能互相覆盖。"""
+    normalized = normalize_tiku_config(
+        {
+            "provider": "TikuYanxi,AI",
+            "token": "yanxi-token",
+            "key": "sk-ai",
+            "endpoint": "https://api.example.com/v1/chat/completions",
+            "model": "gpt-4o-mini",
+        }
+    )
+
+    assert normalized["tokens"] == "yanxi-token"
+    assert normalized["key"] == "sk-ai"
+    assert normalized["endpoint"] == "https://api.example.com/v1/chat/completions"
+    assert normalized["model"] == "gpt-4o-mini"
+
+
+def test_siliconflow_key_is_encrypted_at_rest():
+    from app.services.course.task_store import _SENSITIVE_FIELDS
+
+    assert "siliconflow_key" in _SENSITIVE_FIELDS

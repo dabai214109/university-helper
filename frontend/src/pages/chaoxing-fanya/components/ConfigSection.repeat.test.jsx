@@ -122,4 +122,40 @@ describe('ConfigSection execution cadence', () => {
 
     expect(setRepeat).toHaveBeenCalledWith('daily')
   })
+
+  test('硅基流动选中时出现独立的 Key 输入框', () => {
+    renderConfig({ tikuProvider: ['SiliconFlow'] })
+
+    expect(screen.getByLabelText(/硅基流动 API Key/)).toBeInTheDocument()
+    // 硅基流动不需要地址和模型（有内置默认值）
+    expect(screen.queryByLabelText(/AI 接口地址/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/AI 模型名/)).not.toBeInTheDocument()
+  })
+
+  test('选中 AI 时出现地址/模型/Key 三个框，但不出现硅基流动的框', () => {
+    renderConfig({ tikuProvider: ['AI'] })
+
+    expect(screen.getByLabelText(/AI 接口地址/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/AI 模型名/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/AI API Key/)).toBeInTheDocument()
+    expect(screen.queryByLabelText(/硅基流动 API Key/)).not.toBeInTheDocument()
+  })
+
+  test('同时选 AI 和硅基流动时两组输入框都在', () => {
+    renderConfig({ tikuProvider: ['AI', 'SiliconFlow'] })
+
+    expect(screen.getByLabelText(/AI 接口地址/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/AI API Key/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/硅基流动 API Key/)).toBeInTheDocument()
+  })
+
+  test('都不选时没有任何密钥输入框', () => {
+    renderConfig({ tikuProvider: ['TikuGo'] })
+
+    expect(screen.queryByLabelText(/AI 接口地址/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/AI API Key/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/硅基流动 API Key/)).not.toBeInTheDocument()
+    // 但题库 Token 框始终在
+    expect(screen.getByLabelText(/题库 Token/)).toBeInTheDocument()
+  })
 })
