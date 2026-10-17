@@ -1,0 +1,129 @@
+name: build-fork
+
+# 构建本 fork 的镜像并推送到 GHCR，让服务器可以直接 `docker pull`，
+# 不必在服务器上跑 npm ci + pip（那是最慢的一步）。
+#
+# 触发：push 到 main，或在 Actions 页面手动运行。
+#
+# 产物：
+#   ghcr.io/dabai214109/university-helper-app:latest  (+ :main, :sha-xxxx)
+#   ghcr.io/dabai214109/university-helper-web:latest  (+ :main, :sha-xxxx)
+#
+# ⚠️ 首次运行后必须手动把这两个 package 设为 Public，否则服务器匿名拉取会 401：
+#    GitHub → 个人头像 → Your packages → university-helper-app → Package settings
+#    → Change visibility → Public（web 同理）
+#
+# 只构建 linux/amd64：服务器都是 x86_64，多架构构建会慢一倍且没有必要。
+# 需要 arm 时把 PLATFORMS 改回来。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: dabai214109
+  APP_IMAGE: ghcr.io/dabai214109/university-helper-app
+  WEB_IMAGE: ghcr.io/dabai214109/university-helper-web
+  PLATFORMS: linux/amd64
+
+jobs:
+  build-app:
+    name: build app image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.APP_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=main
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+  build-web:
+    name: build web image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.WEB_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=main
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  # 构建完成后给一个明确结论，省得去翻日志
+  summary:
+    name: summary
+    runs-on: ubuntu-latest
+    needs: [build-app, build-web]
+    steps:
+      - name: Report
+        run: |
+          echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ env.APP_IMAGE }}:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ env.WEB_IMAGE }}:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**首次使用前**：把这两个 package 的可见性改成 Public，" >> "$GITHUB_STEP_SUMMARY"
+          echo "否则服务器 \`docker pull\` 会返回 401。" >> "$GITHUB_STEP_SUMMARY"

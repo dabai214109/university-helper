@@ -18,7 +18,9 @@ services:
       dockerfile: Dockerfile.server
     # 显式命名，便于区分「上游 ghcr.io 镜像」和「本地构建」。
     # 上游部署的镜像是 ghcr.io/sweetcornna/university-helper-app:<tag>。
-    image: university-helper-app:${UH_LOCAL_TAG:-fork}
+    # 默认拉 fork 的预构建镜像（GitHub Actions 产出）。
+    # 想本地构建时用：docker compose build 或 --build
+    image: ${UH_APP_IMAGE:-ghcr.io/dabai214109/university-helper-app:latest}
     container_name: shuake-easy-learning-app
     restart: unless-stopped
     ports:
@@ -77,7 +79,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
-    image: university-helper-web:${UH_LOCAL_TAG:-fork}
+    image: ${UH_WEB_IMAGE:-ghcr.io/dabai214109/university-helper-web:latest}
     container_name: shuake-easy-learning-web
     restart: unless-stopped
     depends_on:

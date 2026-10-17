@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # 一条命令完成部署 / 更新，保留全部数据。
 #
-#   bash scripts/one_command_deploy.sh            # 首次部署或更新（自动判断）
+#   bash scripts/one_command_deploy.sh            # 默认：拉 GHCR 预构建镜像（秒级）
+#   bash scripts/one_command_deploy.sh --build    # 强制本地构建（不依赖 GHCR）
 #   bash scripts/one_command_deploy.sh --backup-only
 #   bash scripts/one_command_deploy.sh --status
 #
 # 设计要点：
+#   · 默认 pull 而不是 build —— 镜像已在 GitHub Actions 构建好并推到 GHCR，
+#     服务器不必跑 npm ci / pip（那是 3-8 分钟）。拉不到才回退本地构建。
 #   · 永远不使用 `docker compose down -v`（-v 会删数据卷）
 #   · 从不重新生成 .env 里已有的密钥（换了 CREDENTIAL_ENCRYPTION_KEY 会让
 #     数据库里已存的平台密码永久解不开）
 #   · 更新前自动备份 .env 和数据库
-#   · 能识别「旧的上游 ghcr.io 镜像部署」，并在它占着端口/容器名时给出明确指引
+#   · 用 RepoDigests 判断镜像是「拉取的」还是「本地构建的」（名字不可靠）
 set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -22,6 +25,11 @@ DB_CONTAINER="shuake-easy-learning-db"
 APP_CONTAINER="shuake-easy-learning-app"
 WEB_CONTAINER="shuake-easy-learning-web"
 BACKUP_DIR="${UH_BACKUP_DIR:-/www/backup}"
+
+# 部署模式：
+#   pull  （默认）拉 GHCR 上的预构建镜像，秒级完成
+#   build          在服务器本地构建，3-8 分钟，但完全不依赖 GHCR
+DEPLOY_MODE="${UH_DEPLOY_MODE:-pull}"
 
 # 上游镜像前缀。用它区分「上游预构建镜像」和「本 fork 本地构建」。
 UPSTREAM_IMAGE_PREFIX="ghcr.io/sweetcornna/"
@@ -287,8 +295,22 @@ cmd_deploy() {
   dc down --remove-orphans 2>/dev/null || true
 
   echo
-  info "构建并启动（首次构建约 3-8 分钟）"
-  dc up -d --build
+  if [[ "$DEPLOY_MODE" == "build" ]]; then
+    info "本地构建并启动（约 3-8 分钟）"
+    dc up -d --build
+  else
+    # 默认拉预构建镜像：GitHub Actions 已经构建好并推到 GHCR，
+    # 服务器只需 docker pull，几秒钟完成，不用跑 npm ci / pip。
+    info "拉取预构建镜像并启动"
+    if ! dc pull 2>/dev/null; then
+      warn "拉取镜像失败（可能是 GHCR 不通，或 package 还是私有）"
+      warn "回退到本地构建…"
+      dc up -d --build
+      DEPLOY_MODE="build"
+    else
+      dc up -d
+    fi
+  fi
 
   echo
   info "等待健康检查…"
@@ -339,6 +361,8 @@ cmd_backup_only() {
 main() {
   case "${1:-deploy}" in
     --status|status)       cmd_status ;;
+    --build)               DEPLOY_MODE="build"; cmd_deploy ;;
+    --pull)                DEPLOY_MODE="pull"; cmd_deploy ;;
     --backup-only|backup)  cmd_backup_only ;;
     -h|--help|help)
       sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
