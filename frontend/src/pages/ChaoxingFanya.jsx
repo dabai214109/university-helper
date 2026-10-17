@@ -322,6 +322,29 @@ export default function ChaoxingFanya() {
     [toast]
   )
 
+  // Logging out cancels running tasks server-side, so ask first.
+  const handleLogoutChaoxing = useCallback(async () => {
+    const confirmed = window.confirm(
+      '确定退出学习通账号？\n\n' +
+        '· 正在运行 / 排队 / 定时中的刷课任务会被取消\n' +
+        '· 下次使用需重新扫码或输入密码\n' +
+        '· 已保存的任务记录与配置不受影响'
+    )
+    if (!confirmed) return
+
+    taskExec.stopPolling?.()
+    taskExec.setTaskId('')
+    taskExec.setTaskStatus(null)
+    taskExec.setLogs([])
+    taskExec.setTaskHistory([])
+    setSelectedCourses([])
+    setQueuedCourses([])
+    setChapters({})
+    setExpanded(new Set())
+
+    await auth.logoutChaoxing()
+  }, [auth, taskExec])
+
 
   const statusText = String(taskExec.taskStatus?.status || '').toLowerCase()
   const isRunning = ['started', 'running', 'pending', 'paused', 'cancelling'].includes(statusText)
@@ -388,12 +411,42 @@ export default function ChaoxingFanya() {
               taskHistory={taskExec.taskHistory}
               taskId={taskExec.taskId}
               selectTaskFromHistory={taskExec.selectTaskFromHistory}
+              removeTaskFromHistory={taskExec.removeTaskFromHistory}
+              removingTaskId={taskExec.removingTaskId}
             />
           </>
         )}
 
 
         <LogSection logs={taskExec.logs} />
+
+        {/* Mirrors the Zhihuishu "退出与清理" card so both platforms behave the
+            same way. Only shown once a Chaoxing session exists. */}
+        {(auth.loggedIn || auth.courses.length > 0) && (
+          <section className={CARD}>
+            <h2 className="mb-4 text-xl font-semibold text-text">退出与清理</h2>
+            <div className="space-y-3">
+              <button
+                type="button"
+                onClick={() => {
+                  void handleLogoutChaoxing()
+                }}
+                className="min-h-[44px] w-full cursor-pointer rounded-xl bg-primary px-6 py-3 font-medium text-white transition duration-200 hover:bg-primary/90"
+              >
+                退出学习通账号
+              </button>
+
+              <div className="rounded-xl border border-border/30 bg-surface/70 p-4 text-sm text-text/70">
+                <p>退出会：</p>
+                <ul className="mt-1 list-inside list-disc space-y-0.5">
+                  <li>先取消该账号正在运行 / 排队 / 定时中的刷课任务</li>
+                  <li>清除学习通登录状态，下次使用需重新扫码或输入密码</li>
+                  <li>不影响已保存的任务记录与配置</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+        )}
       </div>
     </div>
   )

@@ -405,6 +405,10 @@ class ChaoxingLearningManager:
             for task in self._tasks.values():
                 if str(task.get("user_id")) != str(user_id):
                     continue
+                # Soft-deleted tasks stay in storage (auditable, restorable) but
+                # never surface in the queue.
+                if task.get("hidden"):
+                    continue
                 public_task = self._public_view(task)
                 public_task.pop("user_id", None)
                 started_at = (
@@ -416,6 +420,42 @@ class ChaoxingLearningManager:
                     public_task["updated_at"] = started_at
                 tasks.append(public_task)
         return sort_task_records(tasks)
+
+    def hide_task(self, user_id: str, task_id: str) -> dict[str, Any]:
+        """Hide a finished task from the queue (soft delete).
+
+        Deliberately refuses while the task is still active: removing a running
+        task would orphan a live worker, so the caller must stop it first. The
+        row is kept in storage so the history stays auditable.
+        """
+        normalized_user_id = str(user_id or "").strip()
+        normalized_task_id = str(task_id or "").strip()
+        with self._lock:
+            task = self._tasks.get(normalized_task_id)
+            if task and str(task.get("user_id")) == normalized_user_id:
+                pass
+            else:
+                task = None
+        if task is None:
+            self._load_task_from_store(normalized_user_id, normalized_task_id)
+
+        with self._lock:
+            task = self._tasks.get(normalized_task_id)
+            if not task or str(task.get("user_id")) != normalized_user_id:
+                return {"status": "error", "message": "Task not found", "code": "not_found"}
+            status = str(task.get("status") or "").lower()
+            if is_active_status(status) or is_recurring_status(status):
+                return {
+                    "status": "error",
+                    "message": "Task is still active: stop it before removing",
+                    "code": "invalid_status",
+                }
+            task["hidden"] = True
+            task["updated_at"] = _utc_now_iso()
+            persist_request = self._prepare_persist_locked(task)
+        if persist_request:
+            self._persist_task_state(*persist_request)
+        return {"status": "hidden", "message": "Task removed from the queue"}
 
     def get_task_logs(self, user_id: str, task_id: str, cursor: int | None = None) -> dict[str, Any] | None:
         normalized_user_id = str(user_id or "").strip()
@@ -553,10 +593,15 @@ class ChaoxingLearningManager:
                 is_scheduled_cancel = True
                 cancel_message = task["message"]
             else:
-                stop_event: threading.Event = task["_stop_event"]
-                pause_event: threading.Event = task["_pause_event"]
-                stop_event.set()
-                pause_event.set()
+                # A task restored from storage always has these, but a partially
+                # constructed record must not abort the whole cancellation pass
+                # (logout cancels every task of a user in one go).
+                stop_event = task.get("_stop_event")
+                pause_event = task.get("_pause_event")
+                if isinstance(stop_event, threading.Event):
+                    stop_event.set()
+                if isinstance(pause_event, threading.Event):
+                    pause_event.set()
                 if task.get("status") not in {"completed", "failed", "error", "cancelled"}:
                     task["status"] = "cancelling"
                     task["message"] = "Task cancellation requested"
@@ -569,6 +614,49 @@ class ChaoxingLearningManager:
             return {"status": "cancelled", "message": cancel_message}
         self._append_task_log(task_id, "Task cancellation requested", "warning")
         return {"status": "cancelling", "message": "Task cancellation requested"}
+
+    def cancel_all_for_user(self, user_id: str) -> int:
+        """Request cancellation of every active task owned by ``user_id``.
+
+        Used when the user logs out of Chaoxing: the credentials are about to be
+        discarded, so leaving a run in flight would only produce a stream of
+        failures. Returns how many tasks were touched.
+
+        The task registry is snapshotted first — ``stop_task`` mutates
+        ``self._tasks``, and mutating a dict while iterating it raises
+        RuntimeError (which would take the scheduler down with it).
+        """
+        normalized_user_id = str(user_id or '').strip()
+        if not normalized_user_id:
+            return 0
+
+        with self._lock:
+            targets = [
+                str(task.get('task_id') or '')
+                for task in list(self._tasks.values())
+                if str(task.get('user_id') or '').strip() == normalized_user_id
+                and (
+                    is_active_status(task.get('status'))
+                    or is_recurring_status(task.get('status'))
+                )
+            ]
+
+        cancelled = 0
+        for task_id in targets:
+            if not task_id:
+                continue
+            try:
+                result = self.stop_task(normalized_user_id, task_id)
+            except Exception:
+                logger.exception(
+                    'cancel_all_for_user: stop failed for task=%s user=%s',
+                    task_id,
+                    normalized_user_id,
+                )
+                continue
+            if result.get('status') != 'error':
+                cancelled += 1
+        return cancelled
 
     def reschedule_task(
         self,
@@ -1089,7 +1177,10 @@ class ChaoxingLearningManager:
 
         selected_courses = self._select_courses(all_courses, common_config["course_list"])
         if not selected_courses:
-            self._fail_task(task_id, "No available courses after filtering")
+            self._fail_task(
+                task_id,
+                self._describe_empty_selection(all_courses, common_config["course_list"]),
+            )
             return
 
         # Seed the queue view with every selected course, in FIFO order. Names
@@ -1332,6 +1423,42 @@ class ChaoxingLearningManager:
             failure_type = type(exc).__name__
             logger.warning("send learning notification failed: %s", failure_type)
             self._append_task_log(task_id, f"Notification failed ({failure_type})", "warning")
+
+    @staticmethod
+    def _describe_empty_selection(
+        all_courses: list[dict[str, Any]],
+        selectors: list[str],
+    ) -> str:
+        """Explain WHY the selection resolved to nothing.
+
+        "No available courses after filtering" was indistinguishable from an
+        empty timetable, a malformed course ID, and an ID belonging to a
+        different account — which made the admin panel very hard to use. The
+        three cases are told apart here.
+        """
+        if not all_courses:
+            return "No available courses: the Chaoxing account returned an empty course list"
+
+        if not selectors:
+            # Every course was eligible, so filtering is not the cause.
+            return "No available courses after filtering"
+
+        malformed = [s for s in selectors if not str(s or "").strip().isdigit() and "_" not in str(s or "")]
+        if malformed and len(malformed) == len(selectors):
+            sample = ", ".join(str(s) for s in malformed[:2])
+            return (
+                "No available courses after filtering: the course selector is not a course ID "
+                f"({sample}). Expected courseId_classId_cpi, e.g. 264919356_152899105_411776100"
+            )
+
+        available = ", ".join(
+            f"{c.get('courseId')}_{c.get('clazzId')}_{c.get('cpi')}"
+            for c in all_courses[:3]
+        )
+        return (
+            "No available courses after filtering: the requested course IDs are not in this "
+            f"account's course list. Available (first 3): {available}"
+        )
 
     def _run_task_worker_guarded(self, task_id: str, user_id: str, payload: dict[str, Any]) -> None:
         try:

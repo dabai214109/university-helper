@@ -19,6 +19,7 @@ import {
   useToast,
 } from '../components'
 import LearningRecordsPanel from './admin/LearningRecordsPanel'
+import { describeInvalidCourseIds, parseCourseIds } from './admin/courseIds'
 
 const CARD = 'rounded-2xl border border-border/20 bg-surface/80 p-6 shadow-lg backdrop-blur-lg'
 const INPUT = 'w-full rounded-xl border border-border bg-surface px-4 py-2.5 text-sm text-text'
@@ -225,7 +226,7 @@ function ScheduledCard({ task, onStop, stopping }) {
   )
 }
 
-function TaskTable({ tasks, onStop, stoppingId, emptyTitle }) {
+function TaskTable({ tasks, onStop, stoppingId, onHide, hidingId, emptyTitle }) {
   if (tasks.length === 0) return <EmptyState title={emptyTitle} />
   return (
     <div className="overflow-x-auto">
@@ -242,7 +243,11 @@ function TaskTable({ tasks, onStop, stoppingId, emptyTitle }) {
           </tr>
         </thead>
         <tbody>
-          {tasks.map((task) => (
+          {tasks.map((task) => {
+            const status = String(task.status || '').toLowerCase()
+            const live = isLive(status)
+            const recurring = status === 'recurring'
+            return (
             <tr key={task.task_id} className="border-b border-border/50 hover:bg-surface-hover/50">
               <td className="px-3 py-3 font-mono text-xs text-text/70">{task.task_id}</td>
               <td className="px-3 py-3 font-medium text-text">{task.username || task.user_id || '--'}</td>
@@ -255,7 +260,9 @@ function TaskTable({ tasks, onStop, stoppingId, emptyTitle }) {
               <td className="max-w-xs truncate px-3 py-3 text-xs text-text/70">{task.message || '--'}</td>
               <td className="px-3 py-3 text-xs text-text/70">{formatTime(task.updated_at)}</td>
               <td className="px-3 py-3">
-                {isLive(task.status) && (
+                {/* Live work gets 停止; a recurring template gets 取消周期;
+                    finished rows get 移除 (soft delete, records are kept). */}
+                {live && (
                   <button
                     type="button"
                     onClick={() => { void onStop(task.task_id) }}
@@ -265,9 +272,31 @@ function TaskTable({ tasks, onStop, stoppingId, emptyTitle }) {
                     {stoppingId === task.task_id ? '停止中...' : '停止'}
                   </button>
                 )}
+                {recurring && (
+                  <button
+                    type="button"
+                    onClick={() => { void onStop(task.task_id) }}
+                    disabled={stoppingId === task.task_id}
+                    className="rounded-lg border border-warning/30 bg-warning-surface px-3 py-1.5 text-xs font-semibold text-warning hover:bg-warning/10 disabled:opacity-50"
+                  >
+                    {stoppingId === task.task_id ? '取消中...' : '取消周期'}
+                  </button>
+                )}
+                {!live && !recurring && (
+                  <button
+                    type="button"
+                    onClick={() => { void onHide(task.task_id) }}
+                    disabled={hidingId === task.task_id}
+                    title="从列表移除（记录保留在数据库中）"
+                    className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-text/70 hover:bg-surface-hover disabled:opacity-50"
+                  >
+                    {hidingId === task.task_id ? '移除中...' : '移除'}
+                  </button>
+                )}
               </td>
             </tr>
-          ))}
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -318,16 +347,22 @@ function StartTaskPanel({ users, onStarted }) {
       }
     }
 
+    // Validate the course-ID field before sending: the backend can only report
+    // "no courses matched", which does not tell the admin that they pasted a
+    // course name instead of its ID.
+    const { valid: courseIds, invalid: badCourseIds } = parseCourseIds(form.course_ids)
+    if (badCourseIds.length > 0) {
+      toast.error(describeInvalidCourseIds(badCourseIds))
+      return
+    }
+
     setSubmitting(true)
     try {
       const body = {
         user_id: form.user_id,
         username: form.username.trim(),
         password: form.password,
-        course_ids: form.course_ids
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
+        course_ids: courseIds,
         speed: Number(form.speed),
         concurrency: Number(form.concurrency),
         unopened_strategy: form.unopened_strategy,
@@ -407,15 +442,20 @@ function StartTaskPanel({ users, onStarted }) {
           />
         </div>
 
-        <div>
-          <label htmlFor="admin-start-courses" className={LABEL}>课程（可选）</label>
+        <div className="md:col-span-2">
+          <label htmlFor="admin-start-courses" className={LABEL}>课程 ID（可选）</label>
           <input
             id="admin-start-courses"
             className={INPUT}
             value={form.course_ids}
             onChange={set('course_ids')}
-            placeholder="留空 = 全部课程；多门用逗号分隔"
+            placeholder="264919356_152899105_411776100"
           />
+          <p className="mt-1 text-xs text-text-muted">
+            填<strong className="font-semibold text-text/80">课程名称下方那串数字</strong>，
+            格式为 <code className="rounded bg-surface-hover px-1">courseId_classId_cpi</code>。
+            留空 = 全部课程；多门可用逗号、分号或换行分隔。
+          </p>
         </div>
 
         <div>
@@ -616,6 +656,7 @@ export default function Admin() {
   const [error, setError] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [stoppingId, setStoppingId] = useState(null)
+  const [hidingId, setHidingId] = useState(null)
 
   const handleApiError = useCallback((err, fallback) => {
     if (err?.status === 403) {
@@ -731,6 +772,24 @@ export default function Admin() {
       toast.error(err?.message || '停止任务失败')
     } finally {
       setStoppingId(null)
+    }
+  }
+
+  // Soft delete: the row is hidden from the console but kept in the database,
+  // so the run history stays auditable.
+  const handleHide = async (taskId) => {
+    if (!window.confirm(`从列表移除任务 ${taskId}？\n\n记录仍保留在数据库中。`)) return
+    setHidingId(taskId)
+    try {
+      const resp = await api(`/admin/task/${taskId}/hide`, { method: 'POST' })
+      if (resp?.status === 'success') {
+        toast.success(`任务 ${taskId} 已移除`)
+        await reloadAll()
+      }
+    } catch (err) {
+      toast.error(err?.message || '移除任务失败')
+    } finally {
+      setHidingId(null)
     }
   }
 
@@ -963,6 +1022,8 @@ export default function Admin() {
             tasks={tasks}
             onStop={handleStop}
             stoppingId={stoppingId}
+            onHide={handleHide}
+            hidingId={hidingId}
             emptyTitle="暂无任务数据"
           />
         </Card>

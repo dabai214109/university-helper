@@ -602,10 +602,30 @@ async def chaoxing_login_status(user_id: str = Depends(get_current_user_id)):
 
 @router.post("/logout")
 async def chaoxing_logout(user_id: str = Depends(get_current_user_id)):
+    """Log out of Chaoxing: stop running work first, then drop the credentials.
+
+    Order matters. The credentials are about to be discarded, so any task still
+    in flight would immediately start failing; cancelling first keeps the task
+    list honest. A failure while cancelling must not block the logout — the user
+    asked to be signed out, so we still clear the session.
+    """
+    cancelled = 0
+    try:
+        # Deferred import: app.api.v1.course imports this module's siblings.
+        from app.services.course.chaoxing.learning_manager import learning_manager
+
+        cancelled = await _run_blocking(learning_manager.cancel_all_for_user, user_id)
+    except Exception:
+        logger.exception("chaoxing logout: cancelling tasks failed for user=%s", user_id)
+
     _cancel_qr_sessions_for_user(user_id)
     await _run_blocking(signin_manager.logout, user_id)
     chaoxing_cookie_vault.clear(user_id)
-    return {"status": True, "message": "已退出登录", "data": {}}
+
+    message = "已退出登录"
+    if cancelled:
+        message = f"已退出登录，并取消了 {cancelled} 个进行中的任务"
+    return {"status": True, "message": message, "data": {"cancelled_tasks": cancelled}}
 
 
 @router.get("/location/geocode")

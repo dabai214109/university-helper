@@ -441,6 +441,39 @@ export default function useTaskExecution({ callApi, setError, setNotice, pollRef
   )
 
 
+  // Soft-delete a finished task from the queue. The backend refuses while the
+  // task is still active, so the caller only has to surface the message.
+  const [removingTaskId, setRemovingTaskId] = useState('')
+
+  const removeTaskFromHistory = useCallback(
+    async (task) => {
+      const targetId = String(task?.task_id || '').trim()
+      if (!targetId) return
+      if (!window.confirm('从队列移除该任务？\n\n任务记录会保留在服务器上，只是不再显示。')) return
+
+      setRemovingTaskId(targetId)
+      try {
+        const resp = await callApi(`/course/task/${targetId}/hide`, { method: 'POST' })
+        setTaskHistory((prev) => prev.filter((item) => item.task_id !== targetId))
+        // If the removed task was the one on screen, clear the detail view so
+        // the page does not keep polling a task the user just removed.
+        if (taskIdRef.current === targetId) {
+          stopPolling()
+          setTaskId('')
+          setTaskStatus(null)
+          setLogs([])
+        }
+        setNotice?.(resp?.message || '已从队列移除。')
+      } catch (err) {
+        setError?.(err?.message || '移除任务失败。')
+      } finally {
+        setRemovingTaskId('')
+      }
+    },
+    [callApi, setError, setLogs, setNotice, setTaskId, setTaskStatus, stopPolling]
+  )
+
+
   // Polling effect
   useEffect(() => {
 
@@ -580,6 +613,8 @@ export default function useTaskExecution({ callApi, setError, setNotice, pollRef
     appendLogs,
     loadTaskSnapshot,
     selectTaskFromHistory,
+    removeTaskFromHistory,
+    removingTaskId,
     controlTask,
   }
 

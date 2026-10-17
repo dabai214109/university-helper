@@ -233,3 +233,151 @@ def test_cancel_and_fail_helpers_stamp_finished_at(monkeypatch):
         getattr(manager, helper)("t1", "stopped")
 
         assert manager._tasks["t1"]["finished_at"], f"missing for {helper}"
+
+
+# ── soft delete (requirements: 任务队列 移除) ──────────────────────────────────
+
+
+def test_hide_task_marks_the_row_hidden(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "completed"
+
+    result = manager.hide_task("u1", "t1")
+
+    assert result["status"] == "hidden"
+    assert manager._tasks["t1"]["hidden"] is True
+
+
+def test_hidden_tasks_disappear_from_the_queue(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "completed"
+    manager.hide_task("u1", "t1")
+
+    listed = manager.list_tasks("u1")
+
+    assert [task["task_id"] for task in listed] == []
+
+
+def test_hide_refuses_while_the_task_is_active(monkeypatch):
+    """Removing a running task would orphan its worker, so it must be stopped first."""
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "running"
+
+    result = manager.hide_task("u1", "t1")
+
+    assert result.get("code") == "invalid_status"
+    assert not manager._tasks["t1"].get("hidden")
+
+
+def test_hide_refuses_a_recurring_template(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "recurring"
+
+    result = manager.hide_task("u1", "t1")
+
+    assert result.get("code") == "invalid_status"
+
+
+def test_hide_rejects_another_users_task(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "completed"
+
+    result = manager.hide_task("intruder", "t1")
+
+    assert result.get("code") == "not_found"
+    assert not manager._tasks["t1"].get("hidden")
+
+
+# ── cancel_all_for_user (requirements: 退出学习通) ────────────────────────────
+
+
+def test_cancel_all_for_user_targets_only_that_user(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "running"
+    manager._tasks["other"] = {
+        "task_id": "other",
+        "user_id": "u2",
+        "platform": "chaoxing",
+        "status": "running",
+        "message": "",
+        "current_task": "",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+    }
+
+    cancelled = manager.cancel_all_for_user("u1")
+
+    assert cancelled == 1
+    assert manager._tasks["t1"]["status"] == "cancelling"
+    # The other tenant's run must be untouched.
+    assert manager._tasks["other"]["status"] == "running"
+
+
+def test_cancel_all_for_user_includes_scheduled_and_recurring(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "scheduled"
+    manager._tasks["t1"]["schedule"] = {"repeat": "once", "start_at": None, "fire_at": None}
+    manager._tasks["t2"] = {
+        "task_id": "t2",
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "recurring",
+        "message": "",
+        "current_task": "recurring",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "schedule": {"repeat": "daily", "time_of_day": "08:00", "next_fire_at": None},
+    }
+
+    cancelled = manager.cancel_all_for_user("u1")
+
+    assert cancelled == 2
+    assert manager._tasks["t1"]["status"] == "cancelled"
+    assert manager._tasks["t2"]["status"] == "cancelled"
+
+
+def test_cancel_all_for_user_skips_finished_tasks(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    manager._tasks["t1"]["status"] = "completed"
+
+    assert manager.cancel_all_for_user("u1") == 0
+
+
+def test_cancel_all_for_user_survives_a_mutating_registry(monkeypatch):
+    """The registry is snapshotted before cancelling (dict-mutation guard)."""
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+    for index in range(5):
+        manager._tasks[f"t{index}"] = {
+            "task_id": f"t{index}",
+            "user_id": "u1",
+            "platform": "chaoxing",
+            "status": "running",
+            "message": "",
+            "current_task": "",
+            "progress": manager._default_progress(),
+            "logs": [],
+            "_log_cursor": 0,
+        }
+
+    cancelled = manager.cancel_all_for_user("u1")
+
+    assert cancelled == 5
+
+
+def test_cancel_all_for_user_is_a_noop_for_an_unknown_user(monkeypatch):
+    manager = _make_manager(courses=THREE_COURSES)
+    _noop_store(monkeypatch)
+
+    assert manager.cancel_all_for_user("nobody") == 0
+    assert manager.cancel_all_for_user("") == 0

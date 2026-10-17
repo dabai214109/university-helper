@@ -239,9 +239,12 @@ async def admin_tasks(
                 "SELECT t.task_id, t.user_id, t.status, t.message, t.started_at, t.updated_at,"
                 " t.payload, u.username"
                 " FROM course_task_store t LEFT JOIN users u ON u.id::text = t.user_id"
+                # Soft-deleted rows stay in storage but must not appear in the
+                # console; the payload flag is the same one the user queue uses.
+                " WHERE (t.payload -> 'hidden') IS DISTINCT FROM 'true'::jsonb"
             )
             if status is not None:
-                query += " WHERE LOWER(t.status) = %s"
+                query += " AND LOWER(t.status) = %s"
                 params.append(status.lower())
             query += " ORDER BY t.updated_at DESC NULLS LAST LIMIT %s"
             params.append(limit)
@@ -337,6 +340,9 @@ async def admin_learning_records(
     # Filters are shared between the count and the page query.
     where: list[str] = []
     params: list[Any] = []
+    # Soft-deleted rows are hidden here too, so "remove" behaves consistently
+    # across the console and the user queue.
+    where.append("(t.payload -> 'hidden') IS DISTINCT FROM 'true'::jsonb")
     if user_id:
         where.append("t.user_id = %s")
         params.append(str(user_id))
@@ -473,6 +479,44 @@ async def admin_stop_task(
     except Exception:
         logger.exception("admin task stop failed: task_id=%s", task_id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to stop task")
+
+
+@router.post("/task/{task_id}/hide")
+async def admin_hide_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Remove a finished task from the console's task list (soft delete)."""
+    await _require_admin(current_user)
+    try:
+        with get_db_session() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT task_kind, user_id FROM course_task_store WHERE task_id = %s",
+                (task_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+            if str(row["task_kind"] or "") != _LEARNING_TASK_KIND:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="This task type does not support removal",
+                )
+            owner_id = str(row.get("user_id") or "")
+
+        from app.services.course.chaoxing.learning_manager import learning_manager
+
+        result = await asyncio.to_thread(learning_manager.hide_task, owner_id, task_id)
+        if result.get("status") == "error":
+            if result.get("code") == "invalid_status":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result.get("message"))
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result.get("message", "Task not found"))
+        return {"status": "success", "message": result.get("message", "Task removed"), "data": result}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("admin task hide failed: task_id=%s", task_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to remove task")
 
 
 @router.get("/health")

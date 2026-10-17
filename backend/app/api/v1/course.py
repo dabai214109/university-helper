@@ -482,6 +482,20 @@ async def stop_course_task(task_id: str, current_user: dict = Depends(get_curren
     return {"status": "success", "message": result.get("message", "Task cancellation requested"), "data": result}
 
 
+@router.post("/task/{task_id}/hide")
+async def hide_course_task(task_id: str, current_user: dict = Depends(get_current_user)):
+    """Remove a finished task from the user's queue (soft delete)."""
+    user_id = _current_user_id(current_user)
+    learning_manager = _get_learning_manager()
+    result = await _run_blocking(learning_manager.hide_task, user_id=user_id, task_id=task_id)
+    if result.get("status") == "error":
+        code = result.get("code", "not_found")
+        if code == "invalid_status":
+            raise HTTPException(status_code=409, detail=result.get("message", "Cannot remove this task"))
+        raise HTTPException(status_code=404, detail=result.get("message", "Task not found"))
+    return {"status": "success", "message": result.get("message", "Task removed"), "data": result}
+
+
 @router.post("/task/{task_id}/reschedule")
 async def reschedule_course_task(
     task_id: str,

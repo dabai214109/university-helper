@@ -212,6 +212,31 @@ export default function useAuthentication({ stopPolling }) {
   const qrLogin = useChaoxingQrLogin({ request: callApi, onSuccess: handleQrSuccess })
 
 
+  // Log out of Chaoxing entirely: the backend cancels this user's running
+  // tasks first, then drops the session, so the two never disagree. Clearing
+  // the local lists sends the page back to the login card.
+  const logoutChaoxing = useCallback(async () => {
+    setError('')
+    setNotice('')
+    try {
+      qrLogin.stopPolling()
+      const resp = await callApi('/chaoxing/logout', { method: 'POST' })
+      setCourses([])
+      setUsername('')
+      setPassword('')
+      setLoggedIn(false)
+      setNickname('')
+      setNotice(resp?.message || '已退出学习通登录。')
+      return true
+    } catch (err) {
+      setError(err?.message || '退出学习通失败。')
+      return false
+    }
+    // qrLogin is a per-render object; only stopPolling is needed here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callApi, setCourses, setError, setNotice])
+
+
   const handleLogin = useCallback(
 
 
@@ -312,6 +337,7 @@ export default function useAuthentication({ stopPolling }) {
     nickname,
     refreshLoginStatus,
     qrLogin,
+    logoutChaoxing,
   }
 
 
