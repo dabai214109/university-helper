@@ -38,7 +38,7 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ] && [ "$(cat /tmp/apt-mirror
         sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 tini \
+        libpq5 tini tzdata \
     && rm -rf /var/lib/apt/lists/* /tmp/apt-mirror-selection \
     && groupadd -r app --gid 10001 \
     && useradd -r -g app --uid 10001 --home-dir /srv/backend --shell /usr/sbin/nologin app

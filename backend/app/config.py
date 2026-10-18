@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = []
 
+    # 定时任务 / 周期任务的「墙钟时间」按哪个时区解释。
+    #
+    # 用户填 08:00 意思是「我这里的早上 8 点」，不是「UTC 8 点」。容器默认跑在
+    # UTC，若直接把这个 time 当成 UTC 用，北京时间用户会看到下次执行时间偏 8
+    # 小时（08:00 → 显示 16:00）。存储与比较仍然统一用 UTC，只有「把用户输入的
+    # HH:MM 落到哪一天哪个瞬间」这一步需要这个时区。
+    #
+    # 用 IANA 名称（Asia/Shanghai）而不是固定 +08:00，这样夏令时地区也能正确。
+    SCHEDULE_TIMEZONE: str = "Asia/Shanghai"
+
     # Security
     ENFORCE_HTTPS: bool = True
     BCRYPT_ROUNDS: int = 12

@@ -11,8 +11,12 @@ scheduling rules can be tested without the storage/notification stack.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, time, timedelta
+import logging
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+logger = logging.getLogger(__name__)
 
 REPEAT_ONCE = "once"
 REPEAT_DAILY = "daily"
@@ -84,6 +88,46 @@ def clamp_duration_minutes(raw: object) -> int | None:
     return max(MIN_DURATION_MIN, min(value, MAX_DURATION_MIN))
 
 
+DEFAULT_SCHEDULE_TIMEZONE = "Asia/Shanghai"
+
+
+def resolve_timezone(name: object = None) -> tzinfo:
+    """把 IANA 时区名解析成 tzinfo；无效名字回退到默认值。
+
+    用户的「每天 08:00」指的是**本地**早上 8 点。存储层统一用 UTC，
+    所以只在「把 HH:MM 落到某一天」时用这个时区换算。
+
+    用 ZoneInfo 而不是固定偏移，夏令时地区才不会在切换日错一小时。
+
+    注意：slim 镜像**不一定自带 tzdata**。缺了它 ZoneInfo 抛异常，
+    此时回退到 UTC 会让「每天 8 点」又偏 8 小时 —— 所以这里打 warning，
+    而不是静默降级。Dockerfile.server 已显式安装 tzdata。
+    """
+    candidates = [str(name or "").strip(), DEFAULT_SCHEDULE_TIMEZONE, "UTC"]
+    failures: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            failures.append(candidate)
+            continue
+    logger.warning(
+        "SCHEDULE_TIMEZONE could not be resolved (%s); falling back to UTC. "
+        "Scheduled wall-clock times will be interpreted as UTC — install tzdata "
+        "or set a valid IANA name.",
+        ", ".join(failures) or "(empty)",
+    )
+    return UTC
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _period_days(repeat: str) -> int:
     return 2 if repeat == REPEAT_EVERY_OTHER_DAY else 1
 
@@ -94,58 +138,78 @@ def first_occurrence(
     *,
     now: datetime,
     anchor_date: datetime.date | None = None,
+    tz: tzinfo | None = None,
 ) -> datetime:
     """Return the first occurrence strictly after ``now``.
 
     ``every_other_day`` counts in 2-day steps from ``anchor_date`` (defaulting to
     ``now``'s date), so the cadence is stable across restarts instead of drifting
     with whatever moment the task happened to be created.
+
+    ``tz`` is the timezone the user meant when they typed the wall-clock time.
+    The arithmetic is done in that zone (so "08:00" means 8am *there*), and the
+    result is returned in UTC because that is how occurrences are stored and
+    compared everywhere else. Passing ``tz=None`` keeps the old UTC-only
+    behaviour, which is what the unit tests assert for pure date logic.
     """
-    now = _as_utc(now)
-    candidate = datetime.combine(now.date(), time_of_day, tzinfo=UTC)
+    zone = tz or UTC
+    now_utc = _as_utc(now)
+    # Work in local wall-clock terms: "today" and "08:00" are the user's.
+    local_now = now_utc.astimezone(zone)
+
+    def slot(day: datetime.date) -> datetime:
+        return datetime.combine(day, time_of_day, tzinfo=zone)
 
     if repeat == REPEAT_DAILY:
-        if candidate <= now:
-            candidate += timedelta(days=1)
-        return candidate
+        candidate = slot(local_now.date())
+        if candidate <= local_now:
+            candidate = slot(local_now.date() + timedelta(days=1))
+        return candidate.astimezone(UTC)
 
     if repeat == REPEAT_EVERY_OTHER_DAY:
-        anchor = anchor_date or now.date()
-        # Walk forward from the anchor in 2-day steps to the first slot after now.
-        days_ahead = (now.date() - anchor).days
+        anchor = anchor_date or local_now.date()
+        days_ahead = (local_now.date() - anchor).days
         if days_ahead < 0:
             # The anchor is in the future: the first slot IS the anchor's slot.
-            return datetime.combine(anchor, time_of_day, tzinfo=UTC)
+            return slot(anchor).astimezone(UTC)
         steps = days_ahead // 2
-        candidate = datetime.combine(anchor + timedelta(days=steps * 2), time_of_day, tzinfo=UTC)
-        while candidate <= now:
-            candidate += timedelta(days=2)
-        return candidate
+        candidate = slot(anchor + timedelta(days=steps * 2))
+        while candidate <= local_now:
+            candidate = slot(candidate.date() + timedelta(days=2))
+        return candidate.astimezone(UTC)
 
     raise RecurrenceError(f"first_occurrence called with non-recurring repeat: {repeat!r}")
 
 
-def next_occurrence(repeat: str, previous: datetime, time_of_day: time) -> datetime:
+def next_occurrence(
+    repeat: str,
+    previous: datetime,
+    time_of_day: time,
+    *,
+    tz: tzinfo | None = None,
+) -> datetime:
     """Advance one period from ``previous``.
 
     Always returns a time strictly after ``previous``; the caller is responsible
     for skipping past occurrences when catching up after a restart.
+
+    ``tz`` must be the same zone ``first_occurrence`` used, otherwise the day
+    boundary shifts and a "daily 08:00" task can drift by a day.
     """
-    previous = _as_utc(previous)
+    zone = tz or UTC
+    previous_utc = _as_utc(previous)
+    local_previous = previous_utc.astimezone(zone)
     step = timedelta(days=_period_days(repeat))
-    candidate = previous + step
     # Re-anchor the wall-clock time: `previous` may carry jitter, and the next
     # slot must land on the configured time, not on the jittered one.
-    candidate = datetime.combine(candidate.date(), time_of_day, tzinfo=UTC)
-    if candidate <= previous:
-        candidate += step
-    return candidate
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    candidate = datetime.combine(
+        local_previous.date() + step, time_of_day, tzinfo=zone
+    )
+    if candidate <= local_previous:
+        candidate = datetime.combine(
+            candidate.date() + step, time_of_day, tzinfo=zone
+        )
+    return candidate.astimezone(UTC)
 
 
 def describe_schedule(schedule: dict[str, Any]) -> str:

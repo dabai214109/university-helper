@@ -150,6 +150,13 @@ PY
     info "已追加 UPDATE_CHECK_ENABLED=false"
   fi
 
+  # 定时任务的时区。后端缺省也用 Asia/Shanghai，这里写进 .env 是为了
+  # 让用户看得见、改得动（否则改时区得先知道有这个变量）。
+  if ! grep -qE '^SCHEDULE_TIMEZONE=' .env; then
+    printf '\n# 定时/周期任务的墙钟时间按此时区解释（IANA 名称，如 Asia/Shanghai）\nSCHEDULE_TIMEZONE=Asia/Shanghai\n' >> .env
+    info "已追加 SCHEDULE_TIMEZONE=Asia/Shanghai"
+  fi
+
   # CORS 默认只放行 localhost，用 IP 访问会被浏览器拦掉。
   # 首次部署时自动补上本机所有 IPv4 + 实际端口。
   local cors

@@ -21,6 +21,7 @@ from .recurrence import (
     describe_schedule,
     first_occurrence,
     next_occurrence,
+    resolve_timezone,
     normalize_repeat,
     parse_anchor_date,
     parse_time_of_day,
@@ -39,6 +40,21 @@ from .task_admission import (
 
 logger = logging.getLogger(__name__)
 LEARNING_TASK_KIND = "chaoxing_learning"
+
+
+def _schedule_tz():
+    """用户输入「08:00」时所指的时区。
+
+    容器默认跑在 UTC，若把 08:00 直接当 UTC 用，北京时间用户的「每天早上 8 点」
+    会变成 UTC 08:00（= 北京 16:00），界面上就差 8 小时。
+    配置项是 SCHEDULE_TIMEZONE，默认 Asia/Shanghai。
+    """
+    try:
+        from ....config import settings
+
+        return resolve_timezone(getattr(settings, "SCHEDULE_TIMEZONE", None))
+    except Exception:  # pragma: no cover - settings 不可用时回退默认
+        return resolve_timezone(None)
 INTERRUPTED_STATUSES = {"running", "pending", "paused", "cancelling", "stopping"}
 _NOTIFICATION_SERVICE_LABELS = frozenset({"ServerChan", "Qmsg", "Bark", "Telegram"})
 RESTART_INTERRUPTED_MESSAGE = "Task interrupted due to service restart"
@@ -334,7 +350,7 @@ class ChaoxingLearningManager:
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=UTC)
         schedule["next_fire_at"] = first_occurrence(
-            repeat, time_of_day, now=now_dt, anchor_date=anchor_date
+            repeat, time_of_day, now=now_dt, anchor_date=anchor_date, tz=_schedule_tz()
         ).isoformat()
         schedule["last_fired_at"] = None
         schedule["fired_count"] = 0
@@ -1061,6 +1077,7 @@ class ChaoxingLearningManager:
                             str(schedule.get("repeat") or "daily"),
                             next_fire_dt,
                             time_of_day,
+                            tz=_schedule_tz(),
                         )
                     except RecurrenceError:
                         continue
@@ -1074,6 +1091,7 @@ class ChaoxingLearningManager:
                                 str(schedule.get("repeat") or "daily"),
                                 next_dt,
                                 parse_time_of_day(schedule.get("time_of_day")),
+                                tz=_schedule_tz(),
                             )
                         except RecurrenceError:
                             break
@@ -2075,7 +2093,7 @@ class ChaoxingLearningManager:
                     if now_dt.tzinfo is None:
                         now_dt = now_dt.replace(tzinfo=UTC)
                     schedule["next_fire_at"] = first_occurrence(
-                        repeat, time_of_day, now=now_dt, anchor_date=anchor
+                        repeat, time_of_day, now=now_dt, anchor_date=anchor, tz=_schedule_tz()
                     ).isoformat()
                 except (RecurrenceError, ValueError, TypeError, OverflowError):
                     logger.warning(

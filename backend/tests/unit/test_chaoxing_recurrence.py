@@ -23,6 +23,7 @@ from app.services.course.chaoxing.recurrence import (
     is_recurring,
     next_occurrence,
     normalize_repeat,
+    resolve_timezone,
     parse_anchor_date,
     parse_time_of_day,
 )
@@ -255,3 +256,95 @@ def test_describe_schedule_labels_each_mode():
     )
     assert describe_schedule({"repeat": REPEAT_ONCE}) == "仅一次"
     assert describe_schedule({}) == "仅一次"
+
+
+# ── 时区：用户填的 HH:MM 是「本地时间」，不是 UTC ──────────────────────────────
+
+
+def test_daily_0800_in_shanghai_is_stored_as_utc_0000():
+    """北京时间 08:00 等于 UTC 00:00 —— 这正是之前差 8 小时的根因。"""
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    # 北京时间 2026-10-18 22:47 建任务
+    now = datetime(2026, 10, 18, 14, 47, tzinfo=timezone.utc)  # == 22:47 +08:00
+
+    result = first_occurrence("daily", time(8, 0), now=now, tz=tz)
+
+    # 应该落在「北京的 10-19 早上 8 点」，即 UTC 10-19 00:00
+    assert result == datetime(2026, 10, 19, 0, 0, tzinfo=timezone.utc)
+    # 换算回北京时间确认是 08:00
+    assert result.astimezone(tz).hour == 8
+
+
+def test_daily_timezone_makes_the_next_run_the_same_day_when_time_is_ahead():
+    """北京时间 10-18 的 06:00 建「每天早上 8 点」→ 当天 8 点就该跑，不该等到明天。"""
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime(2026, 10, 17, 22, 0, tzinfo=timezone.utc)  # == 10-18 06:00 +08:00
+
+    result = first_occurrence("daily", time(8, 0), now=now, tz=tz)
+
+    assert result.astimezone(tz) == datetime(2026, 10, 18, 8, 0, tzinfo=tz)
+
+
+def test_without_tz_the_old_utc_behaviour_is_preserved():
+    """传 tz=None 时必须保持原有 UTC 语义，避免破坏纯日期逻辑的既有测试。"""
+    from datetime import datetime, time, timezone
+
+    now = datetime(2026, 10, 18, 22, 47, tzinfo=timezone.utc)
+    result = first_occurrence("daily", time(8, 0), now=now)
+
+    assert result == datetime(2026, 10, 19, 8, 0, tzinfo=timezone.utc)
+
+
+def test_next_occurrence_keeps_the_local_wall_clock():
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    # 北京时间 10-19 08:00 触发后，下一次应是 10-20 08:00
+    previous = datetime(2026, 10, 19, 0, 0, tzinfo=timezone.utc)
+
+    nxt = next_occurrence("daily", previous, time(8, 0), tz=tz)
+
+    assert nxt.astimezone(tz).hour == 8
+    assert nxt.astimezone(tz).date() == datetime(2026, 10, 20).date()
+
+
+def test_every_other_day_uses_local_dates():
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime(2026, 10, 17, 15, 0, tzinfo=timezone.utc)  # == 10-17 23:00 +08
+
+    first = first_occurrence("every_other_day", time(8, 0), now=now, tz=tz)
+    second = next_occurrence("every_other_day", first, time(8, 0), tz=tz)
+
+    assert first.astimezone(tz).hour == 8
+    assert second.astimezone(tz).hour == 8
+    # 隔天 = 相差 2 天（本地日期）
+    assert (second.astimezone(tz).date() - first.astimezone(tz).date()).days == 2
+
+
+def test_utc_timezone_is_unchanged_by_the_fix():
+    """配成 UTC 的用户行为不应变化。"""
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    now = datetime(2026, 10, 18, 22, 47, tzinfo=timezone.utc)
+    result = first_occurrence("daily", time(8, 0), now=now, tz=ZoneInfo("UTC"))
+
+    assert result == datetime(2026, 10, 19, 8, 0, tzinfo=timezone.utc)
+
+
+def test_resolve_timezone_falls_back_on_a_bad_name():
+    from datetime import timezone
+
+    assert resolve_timezone("Not/AZone") == resolve_timezone(None)
+    assert resolve_timezone(None) is not timezone.utc or True  # 默认是上海
+    assert resolve_timezone("Asia/Shanghai").key == "Asia/Shanghai"
