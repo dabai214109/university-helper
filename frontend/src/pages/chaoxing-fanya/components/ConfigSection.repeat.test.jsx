@@ -158,4 +158,60 @@ describe('ConfigSection execution cadence', () => {
     // 但题库 Token 框始终在
     expect(screen.getByLabelText(/题库 Token/)).toBeInTheDocument()
   })
+
+  test('Token 输入框默认为空，并提示使用默认 Token', () => {
+    renderConfig({ tikuToken: '' })
+
+    const input = screen.getByLabelText(/题库 Token/)
+    // Empty, not prefilled: the built-in token never enters the DOM.
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('type', 'password')
+    expect(screen.getByPlaceholderText(/使用默认 Token/)).toBeInTheDocument()
+    expect(screen.getByText(/默认 Token 已内置并自动生效/)).toBeInTheDocument()
+  })
+
+  test('开始输入后提示切换为"正在使用你输入的"', () => {
+    renderConfig({ tikuToken: 'my-own-token' })
+    expect(screen.getByText(/正在使用你输入的 Token/)).toBeInTheDocument()
+  })
+
+  test('没有复制按钮，也没有查看按钮（默认 Token 完全不可见）', () => {
+    renderConfig({ tikuToken: '' })
+
+    expect(screen.queryByRole('button', { name: '复制言溪 Token' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /显示 Token|隐藏 Token/ })).not.toBeInTheDocument()
+  })
+
+  test('选了言溪时提示"使用默认 Token"', () => {
+    renderConfig({ tikuProvider: ['TikuYanxi'], tikuToken: '' })
+    expect(screen.getByPlaceholderText(/使用默认 Token/)).toBeInTheDocument()
+    expect(screen.getByText(/默认 Token 已内置并自动生效/)).toBeInTheDocument()
+  })
+
+  test('没选言溪时不显示"使用默认 Token"，并说明不生效', () => {
+    renderConfig({ tikuProvider: ['TikuGo'], tikuToken: '' })
+
+    // The built-in token belongs to 言溪 only; claiming it is in use while
+    // another provider is selected would be a lie.
+    expect(screen.queryByPlaceholderText(/使用默认 Token/)).not.toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/未选择言溪题库/)).toBeInTheDocument()
+    expect(screen.getByText(/只给「言溪题库」用；当前没有选中它/)).toBeInTheDocument()
+  })
+
+  test('选了 Like 题库也不显示默认 Token 提示', () => {
+    renderConfig({ tikuProvider: ['TikuLike'], tikuToken: '' })
+    expect(screen.queryByPlaceholderText(/使用默认 Token/)).not.toBeInTheDocument()
+    expect(screen.getByText(/当前没有选中它/)).toBeInTheDocument()
+  })
+
+  test('言溪和其他题库一起选时，默认 Token 仍然生效', () => {
+    renderConfig({ tikuProvider: ['TikuYanxi', 'TikuGo'], tikuToken: '' })
+    expect(screen.getByPlaceholderText(/使用默认 Token/)).toBeInTheDocument()
+  })
+
+  test('用户自己填的 Token 在没选言溪时也会照常发送', () => {
+    renderConfig({ tikuProvider: ['TikuLike'], tikuToken: 'my-token' })
+    // 输入了具体值就不该被"未选言溪"的提示干扰
+    expect(screen.getByText(/正在使用你输入的 Token/)).toBeInTheDocument()
+  })
 })

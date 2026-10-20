@@ -4,10 +4,10 @@ import { useState } from 'react'
 export default function useTaskConfig() {
 
 
-  const [speed, setSpeed] = useState(1.5)
+  const [speed, setSpeed] = useState(1)
 
 
-  const [concurrency, setConcurrency] = useState(4)
+  const [concurrency, setConcurrency] = useState(1)
 
 
   const [unopenedStrategy, setUnopenedStrategy] = useState('retry')
@@ -18,10 +18,21 @@ export default function useTaskConfig() {
   // 言溪 first (best, if a token is set), then the free GO题库 — so 答题 still
   // works without a Token. (The shared answer cache is always consulted first,
   // so adding 本地缓存 as an extra link would be redundant.)
-  const [tikuProvider, setTikuProvider] = useState(['TikuYanxi', 'TikuGo'])
+  // 默认只选言溪：配合下面预填的 Token，开箱即可答题。
+  // GO 题库是免费兜底源，需要时用户可以自己勾上。
+  const [tikuProvider, setTikuProvider] = useState(['TikuYanxi'])
 
 
+  // Token 的两种状态：
+  //   · ''        → 使用内置默认 Token（隐式生效，界面上只显示提示文字）
+  //   · 非空字符串 → 用户自己填的，覆盖默认值
+  //
+  // 默认 token 不放进 state，而是在提交时由 resolveTikuToken() 兜底 ——
+  // 这样它既不会出现在输入框里，也不会进入渲染树，只有发请求那一刻才出现。
   const [tikuToken, setTikuToken] = useState('')
+  // 用户点过输入框、但还没输入任何内容。用来把占位提示从"使用默认 Token"
+  // 换成真正的空，避免"看起来有值其实没有"的误解。
+  const [tikuTokenTouched, setTikuTokenTouched] = useState(false)
 
   // AI / 题库适配器没有公网默认地址，必须显式提供才能通过后端校验。
   // 硅基流动有默认地址，只需上面的 key。
@@ -73,6 +84,7 @@ export default function useTaskConfig() {
     unopenedStrategy, setUnopenedStrategy,
     tikuProvider, setTikuProvider,
     tikuToken, setTikuToken,
+    tikuTokenTouched, setTikuTokenTouched,
     aiEndpoint, setAiEndpoint,
     aiModel, setAiModel,
     aiApiKey, setAiApiKey,

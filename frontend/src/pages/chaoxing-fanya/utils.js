@@ -1,6 +1,46 @@
 export const TOKEN_ERROR = /(invalid token|token has expired|token validation failed|missing token|invalid authentication credentials)/i
 
 
+// 内置的言溪题库 Token。
+//
+// 只在**发请求时**使用，不写进组件的 state，因此它不会出现在输入框、
+// DOM 或任何可见文本里 —— 用户看到的是「使用默认 Token」这行提示。
+// 用户在输入框里填了内容，就用用户自己的，忽略这个默认值。
+export const DEFAULT_YANXI_TOKEN = 'c83091d7a10743479d24da8bec5e6195'
+
+
+// 内置 Token 只属于言溪。选中别的题库时它既不生效、也不该被提示。
+export const DEFAULT_TOKEN_PROVIDER = 'TikuYanxi'
+
+
+/**
+ * 选中的题库里是否有言溪 —— 决定「默认 Token」这套提示要不要出现。
+ */
+export const usesDefaultToken = (providers) => {
+  const list = Array.isArray(providers) ? providers : [providers]
+  return list.includes(DEFAULT_TOKEN_PROVIDER)
+}
+
+
+/**
+ * 决定这次请求实际要带哪个 Token。
+ *
+ * 空字符串表示"用默认"，不是"没有 token" —— 这个区别很重要：言溪缺 Token
+ * 会被后端从回退链摘掉，默认值兜底才能让开箱即用的承诺成立。
+ *
+ * 默认值**只在选中言溪时**才填：内置 Token 是言溪账号的额度，拿去喂 Like
+ * 题库只会浪费额度且必然认证失败。所以没选言溪时，空就是真的空。
+ *
+ * `useDefault=false` 是"我就是要不带 token"的出口。
+ */
+export const resolveTikuToken = (typed, providers = [DEFAULT_TOKEN_PROVIDER], useDefault = true) => {
+  const text = String(typed ?? '').trim()
+  if (text) return text
+  if (!useDefault) return ''
+  return usesDefaultToken(providers) ? DEFAULT_YANXI_TOKEN : ''
+}
+
+
 export const POLL_MS = 2500
 
 

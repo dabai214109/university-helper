@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useToast } from '../components'
 
-import { CARD, getCourseId, mergeTaskHistory } from './chaoxing-fanya/utils'
+import { CARD, getCourseId, mergeTaskHistory, resolveTikuToken } from './chaoxing-fanya/utils'
 
 
 import useTaskConfig from './chaoxing-fanya/hooks/useTaskConfig'
@@ -13,6 +13,7 @@ import useAuthentication from './chaoxing-fanya/hooks/useAuthentication'
 import LoginSection from './chaoxing-fanya/components/LoginSection'
 import CourseListSection from './chaoxing-fanya/components/CourseListSection'
 import CoursePortalSection from './chaoxing-fanya/components/CoursePortalSection'
+import CourseQueueSection from './chaoxing-fanya/components/CourseQueueSection'
 import ConfigSection from './chaoxing-fanya/components/ConfigSection'
 import TaskControlSection from './chaoxing-fanya/components/TaskControlSection'
 import TaskHistorySection from './chaoxing-fanya/components/TaskHistorySection'
@@ -237,7 +238,12 @@ export default function ChaoxingFanya() {
             ? taskConfig.tikuProvider
             : [taskConfig.tikuProvider]
           ).join(','),
-          token: taskConfig.tikuToken.trim(),
+          // 空字符串 = 用内置默认 Token，不是"没有 token"。
+          // 默认值在这里兜底，因此它不进入组件 state，也就不会渲染到界面上。
+          token: resolveTikuToken(
+            taskConfig.tikuToken,
+            Array.isArray(taskConfig.tikuProvider) ? taskConfig.tikuProvider : [taskConfig.tikuProvider]
+          ),
           coverage_threshold: taskConfig.coverageThreshold,
           judge_mapping: {
             correct: taskConfig.correctOptions
@@ -399,12 +405,41 @@ export default function ChaoxingFanya() {
   const statusText = String(taskExec.taskStatus?.status || '').toLowerCase()
   const isRunning = ['started', 'running', 'pending', 'paused', 'cancelling'].includes(statusText)
 
+  // 标题栏上显示"当前是哪个学习通账号"。
+  // 扫码登录后后端会带 nickname；密码登录不写 vault，拿不到昵称，
+  // 这时退回显示用户输入的账号，总比空着强。
+  const accountLabel = auth.nickname || auth.username || ''
+  // 有会话或已加载到课程时才显示退出按钮，避免未登录时出现一个没意义的按钮。
+  const showLogout = Boolean(auth.loggedIn || auth.courses.length > 0)
+
 
   return (
     <div>
       <div className="space-y-6">
         <section className={CARD}>
-          <h1 className="text-3xl font-bold text-text">超星学习通自动刷课</h1>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h1 className="text-3xl font-bold text-text">超星学习通自动刷课</h1>
+              {/* 昵称只有扫码登录后后端才有；密码登录时退回显示账号本身，
+                  否则这一行会空着，用户看不出当前是哪个号。 */}
+              {accountLabel && (
+                <span className="text-sm text-text/70">
+                  用户：<span className="font-medium text-text">{accountLabel}</span>
+                </span>
+              )}
+            </div>
+            {showLogout && (
+              <button
+                type="button"
+                onClick={() => {
+                  void handleLogoutChaoxing()
+                }}
+                className="min-h-[40px] shrink-0 cursor-pointer rounded-xl border border-border bg-surface px-4 text-sm font-medium text-text/80 transition-colors hover:bg-surface-hover"
+              >
+                退出学习通账号
+              </button>
+            )}
+          </div>
         </section>
 
 
@@ -428,7 +463,6 @@ export default function ChaoxingFanya() {
               setSelectedCourses={setSelectedCourses}
               queuedCourses={queuedCourses}
               onConfirmQueue={confirmQueue}
-              onClearQueue={clearQueue}
               chapters={chapters}
               expanded={expanded}
               toggleExpand={toggleExpand}
@@ -440,6 +474,14 @@ export default function ChaoxingFanya() {
               selectedCourses={selectedCourses}
               setError={auth.setError}
               setNotice={auth.setNotice}
+            />
+
+            {/* 队列清单夹在「学习通课程」和参数配置之间：勾完课、确认加入后，
+                视线往下就是"我排了什么"，再往下才是速度和题库。 */}
+            <CourseQueueSection
+              courses={auth.courses}
+              queuedCourses={queuedCourses}
+              onClearQueue={clearQueue}
             />
 
 
@@ -471,34 +513,6 @@ export default function ChaoxingFanya() {
 
 
         <LogSection logs={taskExec.logs} />
-
-        {/* Mirrors the Zhihuishu "退出与清理" card so both platforms behave the
-            same way. Only shown once a Chaoxing session exists. */}
-        {(auth.loggedIn || auth.courses.length > 0) && (
-          <section className={CARD}>
-            <h2 className="mb-4 text-xl font-semibold text-text">退出与清理</h2>
-            <div className="space-y-3">
-              <button
-                type="button"
-                onClick={() => {
-                  void handleLogoutChaoxing()
-                }}
-                className="min-h-[44px] w-full cursor-pointer rounded-xl bg-primary px-6 py-3 font-medium text-white transition duration-200 hover:bg-primary/90"
-              >
-                退出学习通账号
-              </button>
-
-              <div className="rounded-xl border border-border/30 bg-surface/70 p-4 text-sm text-text/70">
-                <p>退出会：</p>
-                <ul className="mt-1 list-inside list-disc space-y-0.5">
-                  <li>先取消该账号正在运行 / 排队 / 定时中的刷课任务</li>
-                  <li>清除学习通登录状态，下次使用需重新扫码或输入密码</li>
-                  <li>不影响已保存的任务记录与配置</li>
-                </ul>
-              </div>
-            </div>
-          </section>
-        )}
       </div>
     </div>
   )

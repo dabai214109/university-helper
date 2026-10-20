@@ -1,4 +1,4 @@
-import { CARD, toNum } from '../utils'
+import { CARD, toNum, usesDefaultToken } from '../utils'
 
 const UNOPENED_STRATEGIES = [
   { value: 'retry', label: '重试' },
@@ -127,6 +127,8 @@ export default function ConfigSection({
   setTikuProvider,
   tikuToken,
   setTikuToken,
+  tikuTokenTouched,
+  setTikuTokenTouched,
   aiEndpoint,
   setAiEndpoint,
   aiModel,
@@ -182,6 +184,10 @@ export default function ConfigSection({
   // 但 Key 没有默认值，缺了它 provider 会 KeyError 被静默禁用 ——
   // 所以必须给它一个输入框。
   const needsSiliconFlowKey = selectedProviders.includes('SiliconFlow')
+
+  // 内置 Token 只属于言溪：没选言溪时它既不生效，也不该出现在提示里。
+  const hasYanxi = usesDefaultToken(selectedProviders)
+
 
   return (
     <section className={`${CARD} space-y-6`}>
@@ -422,15 +428,42 @@ export default function ConfigSection({
             <label htmlFor="fanya-tiku-token" className="mb-1 block text-sm font-medium text-text/80">
               题库 Token（可选）
             </label>
+            {/*
+              Token 默认不可见：输入框是空的，只显示「使用默认 Token」提示。
+              内置 Token 在提交时才由 resolveTikuToken() 兜底，不进入 state，
+              所以既不在 DOM 里也不在渲染树上 —— 看屏幕、截屏都拿不到它。
+
+              提示文案必须跟着「有没有选言溪」变：内置 Token 是言溪的额度，
+              没选言溪时它不生效，再显示「使用默认 Token」就是骗人。
+            */}
             <input
               id="fanya-tiku-token"
-              className="w-full rounded-xl border border-border bg-surface px-4 py-3"
-              placeholder="言溪题库 / Like 题库的 Token；多个用逗号分隔"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-xl border border-border bg-surface px-4 py-3 font-mono placeholder:font-sans"
+              placeholder={
+                !hasYanxi
+                  ? '未选择言溪题库，此 Token 不会生效'
+                  : tikuTokenTouched
+                    ? '留空则使用默认 Token；输入内容可覆盖'
+                    : '使用默认 Token（如需更换，点击此处输入）'
+              }
               value={tikuToken}
+              onFocus={() => setTikuTokenTouched(true)}
               onChange={(event) => setTikuToken(event.target.value)}
             />
             <p className="mt-1 text-xs text-text-muted">
-              只给「言溪题库 / Like 题库」用。AI 的 Key 填在下面的 AI 区。
+              {/* 优先级：用户自己填的 > 没选言溪 > 默认生效。
+                  自己填了就说"用你填的"，别再拿"未选言溪"干扰他。 */}
+              {tikuToken.trim()
+                ? hasYanxi
+                  ? '正在使用你输入的 Token（留空则回退到默认 Token）。'
+                  : '正在使用你输入的 Token。'
+                : hasYanxi
+                  ? '默认 Token 已内置并自动生效，只给「言溪题库」用。'
+                  : '内置的默认 Token 只给「言溪题库」用；当前没有选中它，所以不会发送默认 Token。'}
+              {' '}AI 的 Key 填在下面的 AI 区。
             </p>
           </div>
 
