@@ -249,4 +249,37 @@ describe('ChaoxingFanya start task loading state', () => {
 
     await waitFor(() => expect(screen.getByTestId('selected-courses')).toBeEmptyDOMElement())
   })
+
+  test('未登录时标题栏不显示用户 ID', () => {
+    // auth.username 有值（登录表单会从 localStorage 恢复上次账号），但
+    // loggedIn 为 false、courses 为空 —— 此时不是"已登录"，不能显示用户。
+    mocks.auth.courses = []
+    mocks.auth.loggedIn = false
+    render(<ChaoxingFanya />)
+
+    expect(screen.queryByText(/用户：/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '退出学习通账号' })).not.toBeInTheDocument()
+  })
+
+  test('已登录时标题栏显示用户，并出现退出按钮', () => {
+    mocks.auth.courses = [{ courseId: 'course-1', name: '测试课程' }]
+    mocks.auth.loggedIn = true
+    mocks.auth.nickname = '爱花花'
+    render(<ChaoxingFanya />)
+
+    // 有昵称时优先显示昵称
+    expect(screen.getByText(/用户：/)).toBeInTheDocument()
+    expect(screen.getByText('爱花花')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '退出学习通账号' })).toBeInTheDocument()
+  })
+
+  test('已登录但没有昵称时回退显示账号', () => {
+    mocks.auth.courses = [{ courseId: 'course-1', name: '测试课程' }]
+    mocks.auth.loggedIn = true
+    mocks.auth.nickname = ''
+    mocks.auth.username = '2410532220'
+    render(<ChaoxingFanya />)
+
+    expect(screen.getByText('2410532220')).toBeInTheDocument()
+  })
 })

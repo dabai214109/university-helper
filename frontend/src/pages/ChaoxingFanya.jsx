@@ -406,11 +406,14 @@ export default function ChaoxingFanya() {
   const isRunning = ['started', 'running', 'pending', 'paused', 'cancelling'].includes(statusText)
 
   // 标题栏上显示"当前是哪个学习通账号"。
-  // 扫码登录后后端会带 nickname；密码登录不写 vault，拿不到昵称，
-  // 这时退回显示用户输入的账号，总比空着强。
-  const accountLabel = auth.nickname || auth.username || ''
-  // 有会话或已加载到课程时才显示退出按钮，避免未登录时出现一个没意义的按钮。
-  const showLogout = Boolean(auth.loggedIn || auth.courses.length > 0)
+  // 是否真的持有一个学习通会话。auth.username 只是登录表单的输入（而且会从
+  // localStorage 里恢复上次用过的账号），未登录时它也可能有值 —— 不能拿它
+  // 当作"已登录"的证据，否则页面会在没登录的情况下显示一个用户 ID。
+  const hasSession = Boolean(auth.loggedIn || auth.courses.length > 0)
+  // 昵称只有扫码登录后后端才有；密码登录不写 vault，拿不到昵称，
+  // 这时退回显示账号本身。但两者都必须建立在 hasSession 之上。
+  const accountLabel = hasSession ? auth.nickname || auth.username || '' : ''
+  const showLogout = hasSession
 
 
   return (
