@@ -21,10 +21,10 @@ from .recurrence import (
     describe_schedule,
     first_occurrence,
     next_occurrence,
-    resolve_timezone,
     normalize_repeat,
     parse_anchor_date,
     parse_time_of_day,
+    resolve_timezone,
 )
 from .task_admission import (
     MAX_ACTIVE_TASKS,

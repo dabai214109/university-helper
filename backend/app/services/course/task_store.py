@@ -97,7 +97,7 @@ def _decrypt_sensitive(payload: dict[str, Any]) -> dict[str, Any]:
                     try:
                         cleaned["tiku_config"] = decrypt_dict_fields(inner, _SENSITIVE_FIELDS)
                     except Exception:
-                        logger.exception("task_store: decrypt tiku_config failed", container)
+                        logger.exception("task_store: decrypt tiku_config failed container=%s", container)
     return decrypted
 
 

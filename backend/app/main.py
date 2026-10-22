@@ -353,7 +353,7 @@ app.include_router(metrics_router, tags=["metrics"])
 
 if settings.PROFILE != "local":
     # Update notices for server administrators; the desktop app updates itself.
-    from app.api.v1 import system, admin
+    from app.api.v1 import admin, system
 
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
