@@ -289,7 +289,14 @@ def login_with_qr(
                 }
             nickname = str(payload.get("nickname") or "").strip()
             uid = str(payload.get("uid") or cookies.get("_uid") or "").strip()
-            _report("success", "登录成功")
+            # Do NOT report "success" here. The browser treats success as
+            # terminal and immediately calls /courses, but at this point the
+            # caller has not stored the jar in the vault nor built the sign-in
+            # client yet -- that happens after this function returns. Reporting
+            # success now made the first /courses call race an unauthenticated
+            # session, so the page stayed on the login card until a manual
+            # reload. "verifying" keeps polling alive until the session exists.
+            _report("verifying", "扫码成功，正在建立登录态…")
             return {
                 "success": True,
                 "message": "登录成功",

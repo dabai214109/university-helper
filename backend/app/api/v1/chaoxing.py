@@ -472,19 +472,16 @@ async def chaoxing_qr_login(user_id: str = Depends(get_current_user_id)):
             logger.exception("Chaoxing QR login worker crashed: session=%s", session_id)
             result = {"success": False, "message": f"二维码登录失败：{exc}"}
 
-        with _qr_sessions_lock:
-            current = _qr_sessions.get(session_id)
-            if current is None:
-                return
-            if result.get("success"):
-                current["status"] = "success"
-                current["message"] = "登录成功"
-            else:
-                current["status"] = "failed"
-                current["message"] = str(result.get("message") or "登录失败")
-            current["updated_at"] = time.time()
-
+        # Publish "failed" immediately, but hold "success" back: the browser
+        # treats success as terminal and calls /courses right away, so the
+        # session (vault + sign-in client) must already exist by then.
         if not result.get("success"):
+            with _qr_sessions_lock:
+                current = _qr_sessions.get(session_id)
+                if current is not None:
+                    current["status"] = "failed"
+                    current["message"] = str(result.get("message") or "登录失败")
+                    current["updated_at"] = time.time()
             return
         cookies = result.get("cookies")
         if not isinstance(cookies, dict) or not cookies:
@@ -511,13 +508,16 @@ async def chaoxing_qr_login(user_id: str = Depends(get_current_user_id)):
             logger.exception("Failed to establish QR session: session=%s", session_id)
             login_result = {"status": False, "message": "登录态建立失败，请重试"}
 
-        if login_result.get("status"):
-            return
+        # Only now is the session usable, so this is when "success" is published.
         with _qr_sessions_lock:
             current = _qr_sessions.get(session_id)
             if current is not None:
-                current["status"] = "failed"
-                current["message"] = str(login_result.get("message") or "登录态建立失败")
+                if login_result.get("status"):
+                    current["status"] = "success"
+                    current["message"] = "登录成功"
+                else:
+                    current["status"] = "failed"
+                    current["message"] = str(login_result.get("message") or "登录态建立失败")
                 current["updated_at"] = time.time()
 
     try:

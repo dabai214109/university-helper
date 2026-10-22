@@ -148,7 +148,13 @@ def test_successful_scan_returns_cookies_and_reports_scanned(monkeypatch):
     assert result["cookies"]["_uid"] == "82659775"
     # The QR image is rendered once, and the intermediate scan state is surfaced.
     assert images == [b"\x89PNG-qr"]
-    assert states == ["pending", "scanned", "success"]
+    # "verifying", not "success": this scan loop must not announce a usable
+    # session, because the caller stores the jar and builds the sign-in client
+    # only after this function returns. Announcing success here made the page's
+    # first /courses call race an unauthenticated session, so the user had to
+    # reload. Only the caller may publish "success", once the session exists.
+    assert states == ["pending", "scanned", "verifying"]
+    assert "success" not in states
 
 
 def test_unscanned_qr_reports_pending_without_succeeding(monkeypatch):
@@ -181,7 +187,10 @@ def test_failed_cookie_validation_does_not_report_success(monkeypatch):
     )
     assert result["success"] is False
     assert "校验失败" in result["message"]
+    # No terminal state at all: not "success", and not "verifying" either --
+    # the scan loop must only report "verifying" once the jar passed validation.
     assert "success" not in states
+    assert "verifying" not in states
 
 
 def test_expired_qr_is_regenerated_for_the_caller(monkeypatch):

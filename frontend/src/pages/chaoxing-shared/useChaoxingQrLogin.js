@@ -6,6 +6,9 @@ export const CHAOXING_QR_POLL_INTERVAL_MS = 2000
 
 // States the backend reports for a QR session. `scanned` is the intermediate
 // "confirm on your phone" step; treating it as terminal would strand the user.
+// `verifying` means the phone already confirmed and the server is still storing
+// the cookie jar and building the sign-in client. Polling must continue: only
+// the later `success` guarantees the next /courses call finds a session.
 export const CHAOXING_QR_TERMINAL_STATES = new Set(['success', 'failed'])
 
 /**

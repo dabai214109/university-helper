@@ -5,6 +5,9 @@ const QR_STATUS_LABELS = {
   loading: '加载中',
   pending: '等待扫码',
   scanned: '已扫码，待确认',
+  // The phone confirmed; the server is still storing the cookie jar and
+  // building the sign-in client before it can report success.
+  verifying: '正在建立登录态',
   success: '登录成功',
   failed: '登录失败',
 }
