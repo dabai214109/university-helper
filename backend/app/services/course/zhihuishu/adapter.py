@@ -145,6 +145,8 @@ class ZhihuishuAdapter:
     def _annotate_watch_state(self, videos: list[dict], data: Any) -> None:
         """给每个视频补上 study_total_time / watch_state，供 watch_video 续播与跳过已完成。
 
+        `status` 是从 watch_state 派生的展示字段：watchState==1 表示知到已计入完成。
+        前端视频列表一直显示 "status" 却没有人赋值，这里补上，让章节完成度有数可依。
         失败（接口异常 / mock 无该方法）时静默忽略：watch_video 会按未学（从 0 开始）处理。
         """
         if not videos:
@@ -162,6 +164,13 @@ class ZhihuishuAdapter:
             state = lv.get(str(v.get("small_lesson_id"))) or lesson.get(str(v.get("lesson_id"))) or {}
             v["study_total_time"] = state.get("studyTotalTime") or 0
             v["watch_state"] = state.get("watchState") or 0
+            # Mirrors the skip rule in learning.watch_video (watch_state == 1).
+            # Parse defensively: the platform has returned it as a string.
+            try:
+                watched = int(v["watch_state"]) == 1
+            except (TypeError, ValueError):
+                watched = False
+            v["status"] = "completed" if watched else "pending"
 
     def start_course(self, course_id: str, speed: float = 1.0, auto_answer: bool = True) -> dict:
         if not self.learning:

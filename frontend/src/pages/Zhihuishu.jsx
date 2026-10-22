@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   List,
@@ -166,6 +166,9 @@ const flattenStructureVideos = (structure) => {
         id: parseCourseId(video?.videoId || video?.id || `${sectionIndex + 1}-${videoIndex + 1}`),
         title: video?.videoName || video?.name || video?.title || `视频 ${result.length + 1}`,
         status: video?.status || 'pending',
+        // watch_state is what the backend uses to skip already-watched videos;
+        // keep it so the chapter completion count has a source.
+        watch_state: video?.watch_state ?? video?.watchState,
         sectionTitle: section.title
       })
     })
@@ -280,6 +283,11 @@ export default function Zhihuishu() {
 
   const [videos, setVideos] = useState([])
   const [videosLoading, setVideosLoading] = useState(false)
+
+  // Per-chapter watched counts, keyed by chapter title. Only /videos/{id}
+  // carries watch_state — the course-detail structure does not — so the
+  // structure panel cannot count completion from its own payload.
+  const [chapterWatch, setChapterWatch] = useState({})
 
   const [progress, setProgress] = useState(null)
   const [progressLoading, setProgressLoading] = useState(false)
@@ -587,6 +595,33 @@ export default function Zhihuishu() {
       const detailVideos = flattenStructureVideos(structure)
       if (detailVideos.length > 0) {
         setVideos((current) => (isCurrent() ? detailVideos : current))
+      }
+
+      // Completion counts need watch_state, which only the videos endpoint
+      // returns. Fail soft: a course whose video list cannot be read still
+      // shows its chapters, just without 已看 counts.
+      if (structure.length > 0) {
+        try {
+          const videoResp = await api(`${ZHIHUISHU_API_BASE}/videos/${courseId}`, { method: 'GET' })
+          if (!isCurrent()) return null
+          const watchedVideos = parseList(videoResp, 'data', 'videos')
+          const counts = {}
+          watchedVideos.forEach((video) => {
+            const title = String(video?.chapter_title ?? video?.chapterTitle ?? '').trim()
+            if (!title) return
+            const bucket = counts[title] || { watched: 0, total: 0 }
+            bucket.total += 1
+            const watched = video?.status === 'completed'
+              || Number(video?.watch_state ?? video?.watchState) === 1
+            if (watched) bucket.watched += 1
+            counts[title] = bucket
+          })
+          setChapterWatch((current) => (isCurrent() ? counts : current))
+        } catch (_) {
+          if (isCurrent()) setChapterWatch({})
+        }
+      } else {
+        setChapterWatch({})
       }
 
       if (!silent && isCurrent()) {
@@ -1782,12 +1817,20 @@ export default function Zhihuishu() {
                       <p className="mt-2 text-sm text-text/70">暂无结构数据，可尝试“查看视频列表/结构”。</p>
                     ) : (
                       <ul className="mt-2 max-h-40 space-y-2 overflow-y-auto pr-1 text-sm text-text/80">
-                        {courseStructure.map((section, index) => (
-                          <li key={`${section.id || index}`} className="rounded-lg border border-border/30 bg-surface/70 px-3 py-2">
-                            <p className="font-medium text-text">{section.title || `结构 ${index + 1}`}</p>
-                            <p className="text-xs text-text/70">视频数：{Array.isArray(section.videos) ? section.videos.length : 0}</p>
-                          </li>
-                        ))}
+                        {courseStructure.map((section, index) => {
+                          const sectionVideos = Array.isArray(section.videos) ? section.videos : []
+                          const sectionTitle = section.title || `结构 ${index + 1}`
+                          const watch = chapterWatch[sectionTitle]
+                          return (
+                            <li key={`${section.id || index}`} className="rounded-lg border border-border/30 bg-surface/70 px-3 py-2">
+                              <p className="font-medium text-text">{sectionTitle}</p>
+                              <p className="text-xs text-text/70">
+                                视频数：{sectionVideos.length || watch?.total || 0}
+                                {watch && watch.total > 0 && ` · 已看 ${watch.watched}/${watch.total}`}
+                              </p>
+                            </li>
+                          )
+                        })}
                       </ul>
                     )}
                   </div>

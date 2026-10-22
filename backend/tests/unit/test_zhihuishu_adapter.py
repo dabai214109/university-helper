@@ -414,6 +414,38 @@ def test_annotate_watch_state_maps_study_info():
     adapter._annotate_watch_state(videos, {"recruitId": "R"})
     assert videos[0]["study_total_time"] == 50 and videos[0]["watch_state"] == 0
     assert videos[1]["study_total_time"] == 99 and videos[1]["watch_state"] == 1
+    # status is the display field derived from watchState; the video list used
+    # to render "unknown" because nothing ever set it.
+    assert videos[0]["status"] == "pending"
+    assert videos[1]["status"] == "completed"
+
+
+def test_annotate_watch_state_tolerates_a_string_watch_state():
+    """The platform has returned watchState as a string; it must still parse."""
+
+    class _L:
+        def query_study_info(self, lesson_ids, video_ids, recruit_id):
+            return {"lv": {"sm": {"studyTotalTime": 10, "watchState": "1"}}, "lesson": {}}
+
+    adapter = ZhihuishuAdapter(ai_config={"enabled": False})
+    adapter.learning = _L()
+    videos = [{"small_lesson_id": "sm", "lesson_id": "Lx"}]
+    adapter._annotate_watch_state(videos, {"recruitId": "R"})
+    assert videos[0]["status"] == "completed"
+
+
+def test_annotate_watch_state_garbage_does_not_mark_completed():
+    """An unparseable watchState must fall back to pending, never completed."""
+
+    class _L:
+        def query_study_info(self, lesson_ids, video_ids, recruit_id):
+            return {"lv": {"sm": {"studyTotalTime": 10, "watchState": "abc"}}, "lesson": {}}
+
+    adapter = ZhihuishuAdapter(ai_config={"enabled": False})
+    adapter.learning = _L()
+    videos = [{"small_lesson_id": "sm", "lesson_id": "Lx"}]
+    adapter._annotate_watch_state(videos, {"recruitId": "R"})
+    assert videos[0]["status"] == "pending"
 
 
 def test_get_video_list_uses_videolist_endpoint_and_video_key():
