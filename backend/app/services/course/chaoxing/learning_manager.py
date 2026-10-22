@@ -59,6 +59,14 @@ INTERRUPTED_STATUSES = {"running", "pending", "paused", "cancelling", "stopping"
 _NOTIFICATION_SERVICE_LABELS = frozenset({"ServerChan", "Qmsg", "Bark", "Telegram"})
 RESTART_INTERRUPTED_MESSAGE = "Task interrupted due to service restart"
 UNEXPECTED_WORKER_ERROR_PREFIX = "Unexpected task failure"
+# Stop reasons. The worker's unwind path reports whichever one is recorded on
+# the task, so a scheduled stop is never mislabelled as a manual cancel.
+STOP_REASON_USER = "user"
+STOP_REASON_SCHEDULE = "schedule"
+CANCEL_MESSAGES = {
+    STOP_REASON_USER: "Task cancelled by user",
+    STOP_REASON_SCHEDULE: "Stopped by schedule: reached max_duration_min",
+}
 USER_TASK_LOAD_LIMIT = 2000
 THREAD_START_FAILURE_MESSAGE = (
     "Server cannot start a new background thread. Stop existing tasks and retry, "
@@ -966,13 +974,17 @@ class ChaoxingLearningManager:
         return {"status": "scheduled", "message": "Task will start immediately"}
 
     def dispatch_scheduled_tasks(self) -> None:
-        """Scan & fire scheduled tasks, auto-pause at stop_at — called every 15s.
+        """Scan & fire scheduled tasks, end them at max_duration_min — every 15s.
 
         Lock-held scan:
           1. scheduled+fire_at=None → resolve jitter, set fire_at.
           2. scheduled+fire_at<=now → rebuild payload, status→pending, collect for worker start.
-          3. (running|pending)+actual_stop_at<=now → pause via event clear.
+          3. (running|pending)+actual_stop_at<=now → end the task (after the lock).
           4. Every 60s: full restore from store to recover from restart gaps.
+
+        Step 3 ends the task rather than pausing it: `paused` is an ACTIVE
+        status, so a paused run kept holding the user's single active slot
+        forever, and _wait_for_resume has no timeout to ever leave it.
 
         IMPORTANT: _append_task_log acquires self._lock, so we must NOT call it
         while holding the lock. Instead we collect log entries and write them
@@ -981,6 +993,8 @@ class ChaoxingLearningManager:
         pending_logs: list[tuple[str, str, str]] = []  # (task_id, message, level)
         to_fire: list[tuple[str, str, dict[str, Any]]] = []
         to_persist: list[tuple[dict[str, Any], _TaskPersistSequencer, int]] = []
+        # Tasks whose max_duration_min has elapsed; ended after the lock is released.
+        to_expire: list[str] = []
         should_restore = False
 
         with self._lock:
@@ -1207,18 +1221,24 @@ class ChaoxingLearningManager:
                             if actual_stop_dt.tzinfo is None:
                                 actual_stop_dt = actual_stop_dt.replace(tzinfo=UTC)
                             if actual_stop_dt <= datetime.now(UTC):
-                                pause_event = task.get("_pause_event")
-                                if isinstance(pause_event, threading.Event):
-                                    pause_event.clear()
-                                task["status"] = "paused"
-                                task["message"] = "Stopped by schedule (stop_at reached)"
-                                task["updated_at"] = _utc_now_iso()
+                                # "Longest run" has to mean stop, not wait.
+                                # Clearing _pause_event alone left the task
+                                # `paused` forever: _wait_for_resume has no
+                                # timeout, and `paused` is still an ACTIVE
+                                # status, so the finished run kept holding the
+                                # user's single active slot until somebody
+                                # cancelled it by hand. Collect it here and end
+                                # it after the lock is released, because
+                                # _cancel_task -> _settle_course_entries takes
+                                # this same non-reentrant lock.
+                                to_expire.append(task_id)
                                 pending_logs.append(
-                                    (task_id, "Auto-paused by schedule stop_at", "info")
+                                    (
+                                        task_id,
+                                        "Reached max_duration_min; ending task by schedule",
+                                        "info",
+                                    )
                                 )
-                                pr = self._prepare_persist_locked(task)
-                                if pr:
-                                    to_persist.append(pr)
                         except (ValueError, TypeError, OverflowError):
                             pass
 
@@ -1232,6 +1252,34 @@ class ChaoxingLearningManager:
         # Lock-free: write logs
         for log_task_id, log_msg, log_level in pending_logs:
             self._append_task_log(log_task_id, log_msg, log_level)
+
+        # Lock-free: end tasks that hit max_duration_min.
+        #
+        # stop_event is set BEFORE settling the record so the worker's
+        # _wait_for_resume loop (0.25s poll) exits and the thread unwinds;
+        # marking the task cancelled without stopping the thread would leave it
+        # running invisibly.
+        for task_id in to_expire:
+            with self._lock:
+                task = self._tasks.get(task_id)
+                if task is None:
+                    continue
+                stop_event = task.get("_stop_event")
+                pause_event = task.get("_pause_event")
+                if isinstance(stop_event, threading.Event):
+                    stop_event.set()
+                if isinstance(pause_event, threading.Event):
+                    # A worker parked in _wait_for_resume checks both events.
+                    pause_event.set()
+                # Record why before cancelling, so the log line names the real
+                # cause instead of assuming a manual cancel.
+                task["_stop_reason"] = STOP_REASON_SCHEDULE
+            # _cancel_task takes the same non-reentrant lock, so it runs outside
+            # the `with` above. Settling the record here rather than relying on
+            # the worker is deliberate: the worker may already have exited (or
+            # never started), and the task would otherwise sit in `cancelling`
+            # forever while still holding an ACTIVE slot.
+            self._cancel_task(task_id)
 
         # Lock-free: start worker threads
         for task_id, uid, payload in to_fire:
@@ -1378,11 +1426,11 @@ class ChaoxingLearningManager:
 
         for index, course in enumerate(selected_courses, start=1):
             if stop_event.is_set():
-                self._cancel_task(task_id, "Task cancelled by user")
+                self._cancel_task(task_id)
                 return
 
             if not self._wait_for_resume(task_id, pause_event, stop_event):
-                self._cancel_task(task_id, "Task cancelled by user")
+                self._cancel_task(task_id)
                 return
 
             course_name = _course_label(course)
@@ -1477,7 +1525,7 @@ class ChaoxingLearningManager:
                 processor = JobProcessor(chaoxing, course, chapter_tasks, run_config)
                 processor.run()
                 if stop_event.is_set():
-                    self._cancel_task(task_id, "Task cancelled by user")
+                    self._cancel_task(task_id)
                     return
                 if processor.failed_tasks:
                     failed_courses += 1
@@ -1505,7 +1553,7 @@ class ChaoxingLearningManager:
             )
 
         if stop_event.is_set():
-            self._cancel_task(task_id, "Task cancelled by user")
+            self._cancel_task(task_id)
             return
 
         if failed_courses > 0:
@@ -1692,10 +1740,25 @@ class ChaoxingLearningManager:
             time.sleep(0.25)
         return not stop_event.is_set()
 
-    def _cancel_task(self, task_id: str, message: str) -> None:
+    def _cancel_task(self, task_id: str, message: str | None = None) -> None:
+        """End a task as cancelled, using the recorded stop reason by default.
+
+        The worker unwind path passes no message and gets the accurate one:
+        a scheduled max_duration_min stop must not be logged as a user cancel.
+        """
+        if message is None:
+            message = CANCEL_MESSAGES.get(self._stop_reason(task_id), CANCEL_MESSAGES[STOP_REASON_USER])
         self._settle_course_entries(task_id, "cancelled")
         self._update_task(task_id, status="cancelled", message=message, current_task="cancelled")
         self._append_task_log(task_id, message, "warning")
+
+    def _stop_reason(self, task_id: str) -> str:
+        """Why this task is stopping: ``schedule`` or ``user``. Caller may hold no lock."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return STOP_REASON_USER
+            return str(task.get("_stop_reason") or STOP_REASON_USER)
 
     def _settle_course_entries(self, task_id: str, status: str) -> None:
         """Mark every non-terminal queue entry as ``status``.

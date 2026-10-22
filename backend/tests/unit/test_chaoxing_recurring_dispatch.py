@@ -473,3 +473,113 @@ def test_start_now_still_works_for_a_one_shot_task(monkeypatch):
     assert result["status"] == "scheduled"
     assert manager._tasks["one-shot"]["schedule"]["fire_at"]
     assert manager._tasks["one-shot"]["status"] == "scheduled"
+
+
+# ── max_duration_min: reaching it must END the task ───────────────────────────
+
+
+def _running_child(manager, *, task_id="child-1", stop_in_minutes=-5):
+    """A running child task whose max_duration_min has already elapsed."""
+    import threading
+
+    stop_event = threading.Event()
+    pause_event = threading.Event()
+    pause_event.set()  # the worker is allowed to run right now
+    manager._tasks[task_id] = {
+        "task_id": task_id,
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "running",
+        "message": "Learning course 1/1",
+        "current_task": "course:测试课程",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "_stop_event": stop_event,
+        "_pause_event": pause_event,
+        "schedule": {
+            "repeat": "once",
+            "start_at": None,
+            "stop_at": None,
+            "start_jitter_min": 0,
+            "stop_jitter_min": 0,
+            "fire_at": None,
+            # Already in the past => max_duration_min has elapsed.
+            "actual_stop_at": (
+                datetime.now(UTC) + timedelta(minutes=stop_in_minutes)
+            ).isoformat(),
+            "parent_task_id": "tpl-1",
+        },
+    }
+    return manager._tasks[task_id], stop_event, pause_event
+
+
+def test_reaching_max_duration_ends_the_task_not_pauses_it(monkeypatch):
+    """The old behaviour left the task `paused` forever and holding the slot.
+
+    `paused` is an ACTIVE status, so a run that hit max_duration_min kept
+    occupying the user's single active-task slot until somebody cancelled it by
+    hand -- the reported "11pm and still not finished" bug.
+    """
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    task, stop_event, _pause_event = _running_child(manager)
+
+    manager.dispatch_scheduled_tasks()
+
+    assert task["status"] == "cancelled"
+    assert task["_stop_reason"] == lm.STOP_REASON_SCHEDULE
+    # The worker thread must also be told to unwind, otherwise it keeps running
+    # invisibly while the record says cancelled.
+    assert stop_event.is_set()
+
+
+def test_schedule_stop_is_not_reported_as_a_user_cancel(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    task, _stop, _pause = _running_child(manager)
+
+    manager.dispatch_scheduled_tasks()
+
+    assert task["message"] == lm.CANCEL_MESSAGES[lm.STOP_REASON_SCHEDULE]
+    assert "user" not in task["message"].lower()
+
+
+def test_a_user_cancelled_task_keeps_its_own_message(monkeypatch):
+    """The schedule path must not hijack the wording of a manual cancel."""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    task, stop_event, _pause = _running_child(manager)
+    task["_stop_reason"] = lm.STOP_REASON_USER
+    stop_event.set()
+
+    manager._cancel_task(task["task_id"])
+
+    assert task["message"] == lm.CANCEL_MESSAGES[lm.STOP_REASON_USER]
+
+
+def test_expired_task_stops_holding_an_active_slot(monkeypatch):
+    """count_active_tasks drops once the expired run is cancelled."""
+    from app.services.course.chaoxing.task_admission import count_active_tasks
+
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_child(manager)
+    assert count_active_tasks(manager._tasks) == 1
+
+    manager.dispatch_scheduled_tasks()
+
+    assert count_active_tasks(manager._tasks) == 0
+
+
+def test_task_before_max_duration_keeps_running(monkeypatch):
+    """Not yet due: nothing may be touched."""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    task, stop_event, pause_event = _running_child(manager, stop_in_minutes=+30)
+
+    manager.dispatch_scheduled_tasks()
+
+    assert task["status"] == "running"
+    assert not stop_event.is_set()
+    assert pause_event.is_set()
