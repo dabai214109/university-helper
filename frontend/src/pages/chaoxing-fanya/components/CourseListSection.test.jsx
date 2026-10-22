@@ -66,3 +66,50 @@ describe('CourseListSection selection state', () => {
     expect(refreshButton).toHaveTextContent('刷新课程')
   })
 })
+
+describe('CourseListSection chapter badges', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  const renderExpanded = (chapters) =>
+    render(
+      <CourseListSection
+        courses={[{ courseId: 'course-a' }]}
+        selectedCourses={[]}
+        setSelectedCourses={() => {}}
+        chapters={{ 'course-a': chapters }}
+        expanded={new Set(['course-a'])}
+        toggleExpand={() => {}}
+        loadCourses={() => Promise.resolve()}
+      />,
+    )
+
+  test('shows 已完成 and 待解锁 from the backend flags', () => {
+    renderExpanded([
+      { id: 'p1', title: '1.1 函数', has_finished: true, need_unlock: false },
+      { id: 'p2', title: '1.2 极限', has_finished: false, need_unlock: true },
+      { id: 'p3', title: '1.3 连续', has_finished: false, need_unlock: false },
+    ])
+
+    expect(screen.getByText('1.1 函数')).toBeInTheDocument()
+    expect(screen.getAllByText('已完成')).toHaveLength(1)
+    expect(screen.getAllByText('待解锁')).toHaveLength(1)
+    // The untouched chapter must not borrow a badge from its neighbours.
+    expect(screen.getAllByText('已完成')).toHaveLength(1)
+  })
+
+  test('numbers chapters and falls back to the name field', () => {
+    renderExpanded([{ id: 'p1', name: '命名回退' }])
+
+    expect(screen.getByText('1.')).toBeInTheDocument()
+    expect(screen.getByText('命名回退')).toBeInTheDocument()
+    expect(screen.queryByText('未命名章节')).not.toBeInTheDocument()
+  })
+
+  test('keeps a chapter without an id renderable', () => {
+    renderExpanded([{ title: '无 ID 的章节' }])
+
+    expect(screen.getByText('无 ID 的章节')).toBeInTheDocument()
+  })
+})

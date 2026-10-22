@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CARD, getCourseId, getCourseName } from '../utils'
+import { CARD, getChapterId, getChapterTitle, getCourseId, getCourseName } from '../utils'
 
 
 export default function CourseListSection({
@@ -250,13 +250,29 @@ export default function CourseListSection({
                 <div className="mt-2 space-y-1 text-sm text-text/70">
 
 
-                  {(chapters[courseId] || []).map((chapter) => (
+                  {(chapters[courseId] || []).map((chapter, index) => (
 
 
-                    <div key={`${courseId}-${chapter.id || chapter.name}`} className="rounded-lg bg-surface px-3 py-2">
+                    <div
+                      key={`${courseId}-${getChapterId(chapter) || index}`}
+                      className="flex min-h-[36px] items-center gap-3 rounded-lg bg-surface px-3 py-2"
+                    >
 
 
-                      {chapter.title || chapter.name}
+                      <span className="w-6 shrink-0 text-right text-xs tabular-nums text-text-muted">{index + 1}.</span>
+
+
+                      <span className="min-w-0 flex-1 break-words">{getChapterTitle(chapter)}</span>
+
+
+                      {chapter?.has_finished && (
+                        <span className="shrink-0 rounded-full bg-success-surface px-2 py-0.5 text-xs text-success">已完成</span>
+                      )}
+
+
+                      {chapter?.need_unlock && (
+                        <span className="shrink-0 rounded-full bg-warning-surface px-2 py-0.5 text-xs text-warning">待解锁</span>
+                      )}
 
 
                     </div>

@@ -119,7 +119,7 @@ export default function ChaoxingFanya() {
       const courseId = getCourseId(course)
       if (!courseId) return
 
-
+      const opening = !expanded.has(courseId)
       setExpanded((prev) => {
         const next = new Set(prev)
         if (next.has(courseId)) next.delete(courseId)
@@ -127,9 +127,9 @@ export default function ChaoxingFanya() {
         return next
       })
 
-
-      if (chapters[courseId]) return
-
+      // Refetch on every open: 已完成 / 待解锁 change as tasks run, so a list
+      // cached from the first expand would keep showing stale badges.
+      if (!opening) return
 
       try {
         const resp = await auth.callApi(`/course/chapters/${courseId}`)
@@ -139,7 +139,7 @@ export default function ChaoxingFanya() {
         auth.setError(err?.message || '获取章节失败。')
       }
     },
-    [auth, chapters]
+    [auth, expanded]
   )
 
 

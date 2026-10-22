@@ -140,6 +140,15 @@ export const getCourseName = (course) => {
 }
 
 
+// Chapters come from /course/chapters/{id}; the backend already reports
+// `has_finished` / `need_unlock` per point, so these only normalize the shape.
+export const getChapterId = (chapter) => normalizeCourseText(chapter?.id)
+
+
+export const getChapterTitle = (chapter) =>
+  normalizeCourseText(chapter?.title) || normalizeCourseText(chapter?.name) || '未命名章节'
+
+
 export const normalizeTaskItem = (task) => {
 
 
