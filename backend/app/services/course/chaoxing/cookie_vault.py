@@ -41,6 +41,8 @@ _VAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 # 持久化用的 task_kind。复用 course_task_store 表，不新增表结构。
 # 前缀刻意与 LEARNING_TASK_KIND 区分开，避免被任务列表查询扫到。
 _VAULT_TASK_KIND = "chaoxing_cookie_vault"
+
+
 # 一个用户一条记录，task_id 固定成 user_id 便于按主键直接取。
 def _vault_task_id(user_id: str) -> str:
     return f"vault-{user_id}"

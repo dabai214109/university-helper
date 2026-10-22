@@ -39,9 +39,7 @@ def normalize_repeat(raw: object) -> str:
     if not text:
         return REPEAT_ONCE
     if text not in VALID_REPEATS:
-        raise RecurrenceError(
-            f"Invalid repeat: {raw!r}. Allowed: {', '.join(sorted(VALID_REPEATS))}"
-        )
+        raise RecurrenceError(f"Invalid repeat: {raw!r}. Allowed: {', '.join(sorted(VALID_REPEATS))}")
     return text
 
 
@@ -202,13 +200,9 @@ def next_occurrence(
     step = timedelta(days=_period_days(repeat))
     # Re-anchor the wall-clock time: `previous` may carry jitter, and the next
     # slot must land on the configured time, not on the jittered one.
-    candidate = datetime.combine(
-        local_previous.date() + step, time_of_day, tzinfo=zone
-    )
+    candidate = datetime.combine(local_previous.date() + step, time_of_day, tzinfo=zone)
     if candidate <= local_previous:
-        candidate = datetime.combine(
-            candidate.date() + step, time_of_day, tzinfo=zone
-        )
+        candidate = datetime.combine(candidate.date() + step, time_of_day, tzinfo=zone)
     return candidate.astimezone(UTC)
 
 

@@ -55,6 +55,8 @@ def _schedule_tz():
         return resolve_timezone(getattr(settings, "SCHEDULE_TIMEZONE", None))
     except Exception:  # pragma: no cover - settings 不可用时回退默认
         return resolve_timezone(None)
+
+
 INTERRUPTED_STATUSES = {"running", "pending", "paused", "cancelling", "stopping"}
 _NOTIFICATION_SERVICE_LABELS = frozenset({"ServerChan", "Qmsg", "Bark", "Telegram"})
 RESTART_INTERRUPTED_MESSAGE = "Task interrupted due to service restart"
@@ -178,9 +180,7 @@ class ChaoxingLearningManager:
         except RecurrenceError as exc:
             raise ValueError(str(exc)) from exc
         is_recurring = repeat != REPEAT_ONCE
-        is_scheduled = (
-            isinstance(schedule_start_at, str) and schedule_start_at.strip()
-        ) or is_recurring
+        is_scheduled = (isinstance(schedule_start_at, str) and schedule_start_at.strip()) or is_recurring
         # 链式排队：如果该用户已有活跃任务，新任务不是报 409，而是挂到链尾，
         # 等前一个结束后自动开始。chaoxing_learning 的单一活跃约束保留
         # （同时只跑一个），只是把「被拒绝」改成「排队」。
@@ -405,9 +405,7 @@ class ChaoxingLearningManager:
         max_duration = schedule.get("max_duration_min")
         if max_duration:
             try:
-                child_schedule["actual_stop_at"] = (
-                    now + timedelta(minutes=int(max_duration))
-                ).isoformat()
+                child_schedule["actual_stop_at"] = (now + timedelta(minutes=int(max_duration))).isoformat()
             except (TypeError, ValueError):
                 pass
 
@@ -539,9 +537,7 @@ class ChaoxingLearningManager:
         try:
             new_task_id = self.start_task(user_id, payload)
         except TaskAlreadyActiveError:
-            logger.warning(
-                "queued task could not start (another task became active): user=%s", user_id
-            )
+            logger.warning("queued task could not start (another task became active): user=%s", user_id)
             return
         except Exception:
             logger.exception("queued task failed to start: user=%s", user_id)
@@ -559,9 +555,7 @@ class ChaoxingLearningManager:
             if pr:
                 self._persist_task_state(*pr)
 
-        self._append_task_log(
-            new_task_id, f"Started from queue (behind {task_id})", "info"
-        )
+        self._append_task_log(new_task_id, f"Started from queue (behind {task_id})", "info")
 
     def list_tasks(self, user_id: str) -> list[dict[str, Any]]:
         self._ensure_tasks_loaded_for_user(user_id)
@@ -749,9 +743,7 @@ class ChaoxingLearningManager:
                 # to delete a recurring schedule.
                 was_recurring = is_recurring_status(task.get("status"))
                 task["status"] = "cancelled"
-                task["message"] = (
-                    "Recurring schedule cancelled" if was_recurring else "Scheduled task cancelled"
-                )
+                task["message"] = "Recurring schedule cancelled" if was_recurring else "Scheduled task cancelled"
                 task["current_task"] = "cancelled"
                 task["updated_at"] = _utc_now_iso()
                 task.setdefault("finished_at", task["updated_at"])
@@ -792,19 +784,16 @@ class ChaoxingLearningManager:
         ``self._tasks``, and mutating a dict while iterating it raises
         RuntimeError (which would take the scheduler down with it).
         """
-        normalized_user_id = str(user_id or '').strip()
+        normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             return 0
 
         with self._lock:
             targets = [
-                str(task.get('task_id') or '')
+                str(task.get("task_id") or "")
                 for task in list(self._tasks.values())
-                if str(task.get('user_id') or '').strip() == normalized_user_id
-                and (
-                    is_active_status(task.get('status'))
-                    or is_recurring_status(task.get('status'))
-                )
+                if str(task.get("user_id") or "").strip() == normalized_user_id
+                and (is_active_status(task.get("status")) or is_recurring_status(task.get("status")))
             ]
 
         cancelled = 0
@@ -815,12 +804,12 @@ class ChaoxingLearningManager:
                 result = self.stop_task(normalized_user_id, task_id)
             except Exception:
                 logger.exception(
-                    'cancel_all_for_user: stop failed for task=%s user=%s',
+                    "cancel_all_for_user: stop failed for task=%s user=%s",
                     task_id,
                     normalized_user_id,
                 )
                 continue
-            if result.get('status') != 'error':
+            if result.get("status") != "error":
                 cancelled += 1
         return cancelled
 
@@ -961,9 +950,7 @@ class ChaoxingLearningManager:
                     "message": THREAD_START_FAILURE_MESSAGE,
                     "code": "thread_start_failed",
                 }
-            self._append_task_log(
-                task_id, f"Recurring occurrence started manually → task {child_id}", "info"
-            )
+            self._append_task_log(task_id, f"Recurring occurrence started manually → task {child_id}", "info")
             return {
                 "status": "pending",
                 "message": "Recurring occurrence started",
@@ -1025,9 +1012,7 @@ class ChaoxingLearningManager:
                     if not next_fire_raw:
                         continue
                     try:
-                        next_fire_dt = datetime.fromisoformat(
-                            str(next_fire_raw).strip().replace("Z", "+00:00")
-                        )
+                        next_fire_dt = datetime.fromisoformat(str(next_fire_raw).strip().replace("Z", "+00:00"))
                         if next_fire_dt.tzinfo is None:
                             next_fire_dt = next_fire_dt.replace(tzinfo=UTC)
                     except (ValueError, TypeError, OverflowError):
@@ -1037,11 +1022,7 @@ class ChaoxingLearningManager:
                         continue
 
                     creds = task.get("credentials")
-                    has_password = (
-                        isinstance(creds, dict)
-                        and creds.get("username")
-                        and creds.get("password")
-                    )
+                    has_password = isinstance(creds, dict) and creds.get("username") and creds.get("password")
                     has_qr_session = bool(chaoxing_cookie_vault.get(uid))
                     if not has_password and not has_qr_session:
                         # Skip this occurrence rather than killing the schedule:
@@ -1114,8 +1095,7 @@ class ChaoxingLearningManager:
                     schedule["fired_count"] = int(schedule.get("fired_count") or 0) + 1
                     task["updated_at"] = _utc_now_iso()
                     task["message"] = (
-                        f"Recurring template ({describe_schedule(schedule)}) — "
-                        f"next {next_dt.isoformat()}"
+                        f"Recurring template ({describe_schedule(schedule)}) — " f"next {next_dt.isoformat()}"
                     )
                     pr = self._prepare_persist_locked(task)
                     if pr:
@@ -1125,9 +1105,7 @@ class ChaoxingLearningManager:
                 if status == "scheduled":
                     if schedule.get("fire_at") is None:
                         try:
-                            start_dt = datetime.fromisoformat(
-                                str(schedule["start_at"]).strip().replace("Z", "+00:00")
-                            )
+                            start_dt = datetime.fromisoformat(str(schedule["start_at"]).strip().replace("Z", "+00:00"))
                             if start_dt.tzinfo is None:
                                 start_dt = start_dt.replace(tzinfo=UTC)
                             jitter_min = max(0, int(schedule.get("start_jitter_min", 0) or 0))
@@ -1138,9 +1116,7 @@ class ChaoxingLearningManager:
                             schedule["fire_at"] = _utc_now_iso()
 
                     try:
-                        fire_dt = datetime.fromisoformat(
-                            str(schedule["fire_at"]).replace("Z", "+00:00")
-                        )
+                        fire_dt = datetime.fromisoformat(str(schedule["fire_at"]).replace("Z", "+00:00"))
                         if fire_dt.tzinfo is None:
                             fire_dt = fire_dt.replace(tzinfo=UTC)
                     except (ValueError, TypeError, OverflowError):
@@ -1151,9 +1127,7 @@ class ChaoxingLearningManager:
                         actual_stop = None
                         if stop_at_raw and str(stop_at_raw).strip():
                             try:
-                                stop_dt = datetime.fromisoformat(
-                                    str(stop_at_raw).strip().replace("Z", "+00:00")
-                                )
+                                stop_dt = datetime.fromisoformat(str(stop_at_raw).strip().replace("Z", "+00:00"))
                                 if stop_dt.tzinfo is None:
                                     stop_dt = stop_dt.replace(tzinfo=UTC)
                                 stop_jitter = max(0, int(schedule.get("stop_jitter_min", 0) or 0))
@@ -1164,9 +1138,7 @@ class ChaoxingLearningManager:
                                 )
                             except (ValueError, TypeError, OverflowError):
                                 pass
-                        schedule["actual_stop_at"] = (
-                            actual_stop.isoformat() if actual_stop else None
-                        )
+                        schedule["actual_stop_at"] = actual_stop.isoformat() if actual_stop else None
 
                         task["status"] = "pending"
                         task["message"] = "Scheduled task starting"
@@ -1174,11 +1146,7 @@ class ChaoxingLearningManager:
                         pending_logs.append((task_id, f"Scheduled task fired at {_utc_now_iso()}", "info"))
 
                         creds = task.get("credentials")
-                        has_password = (
-                            isinstance(creds, dict)
-                            and creds.get("username")
-                            and creds.get("password")
-                        )
+                        has_password = isinstance(creds, dict) and creds.get("username") and creds.get("password")
                         # A QR-scanned user has no stored password; their cookie
                         # jar may still be live in the vault after a restart.
                         has_qr_session = bool(chaoxing_cookie_vault.get(uid))
@@ -1192,9 +1160,7 @@ class ChaoxingLearningManager:
                             task["current_task"] = "failed"
                             task["updated_at"] = _utc_now_iso()
                             task.setdefault("finished_at", task["updated_at"])
-                            pending_logs.append(
-                                (task_id, task["message"], "error")
-                            )
+                            pending_logs.append((task_id, task["message"], "error"))
                             pr = self._prepare_persist_locked(task)
                             if pr:
                                 to_persist.append(pr)
@@ -1215,9 +1181,7 @@ class ChaoxingLearningManager:
                     actual_stop_raw = schedule.get("actual_stop_at")
                     if actual_stop_raw and str(actual_stop_raw).strip():
                         try:
-                            actual_stop_dt = datetime.fromisoformat(
-                                str(actual_stop_raw).strip().replace("Z", "+00:00")
-                            )
+                            actual_stop_dt = datetime.fromisoformat(str(actual_stop_raw).strip().replace("Z", "+00:00"))
                             if actual_stop_dt.tzinfo is None:
                                 actual_stop_dt = actual_stop_dt.replace(tzinfo=UTC)
                             if actual_stop_dt <= datetime.now(UTC):
@@ -1364,8 +1328,8 @@ class ChaoxingLearningManager:
             return
 
         try:
-            login_state = chaoxing.login_with_cookie_jar(cookies) if cookies else chaoxing.login(
-                login_with_cookies=False
+            login_state = (
+                chaoxing.login_with_cookie_jar(cookies) if cookies else chaoxing.login(login_with_cookies=False)
             )
         except Exception as exc:
             self._fail_task(task_id, f"Login request failed: {exc}")
@@ -1659,10 +1623,7 @@ class ChaoxingLearningManager:
                 f"({sample}). Expected courseId_classId_cpi, e.g. 264919356_152899105_411776100"
             )
 
-        available = ", ".join(
-            f"{c.get('courseId')}_{c.get('clazzId')}_{c.get('cpi')}"
-            for c in all_courses[:3]
-        )
+        available = ", ".join(f"{c.get('courseId')}_{c.get('clazzId')}_{c.get('cpi')}" for c in all_courses[:3])
         return (
             "No available courses after filtering: the requested course IDs are not in this "
             f"account's course list. Available (first 3): {available}"
@@ -1978,9 +1939,7 @@ class ChaoxingLearningManager:
     def _public_view(task: dict[str, Any]) -> dict[str, Any]:
         """Return API-safe view: drop private keys, credentials, and schedule_args."""
         return {
-            k: v
-            for k, v in task.items()
-            if not str(k).startswith("_") and k not in ("credentials", "schedule_args")
+            k: v for k, v in task.items() if not str(k).startswith("_") and k not in ("credentials", "schedule_args")
         }
 
     @staticmethod
