@@ -138,7 +138,8 @@ async def admin_overview(current_user: dict = Depends(get_current_user)):
             active_placeholders = ", ".join(["%s"] * len(ACTIVE_TASK_STATUSES))
             active_params = [s.lower() for s in ACTIVE_TASK_STATUSES]
             cur.execute(
-                f"SELECT COUNT(*) AS cnt FROM course_task_store WHERE LOWER(status) IN ({active_placeholders})",
+                # B608: only generated %s placeholders are interpolated; values are bound.
+                f"SELECT COUNT(*) AS cnt FROM course_task_store WHERE LOWER(status) IN ({active_placeholders})",  # nosec B608
                 active_params,
             )
             row = cur.fetchone()
@@ -190,7 +191,8 @@ async def admin_users(
             active_placeholders = ", ".join(["%s"] * len(ACTIVE_TASK_STATUSES))
             active_params = [s.lower() for s in ACTIVE_TASK_STATUSES]
             cur.execute(
-                f"SELECT user_id,"
+                # B608: only generated %s placeholders are interpolated; values are bound.
+                f"SELECT user_id,"  # nosec B608
                 f" COUNT(*) FILTER (WHERE LOWER(status) IN ({active_placeholders})) AS active_tasks,"
                 f" COUNT(*) FILTER (WHERE LOWER(status) = 'scheduled') AS scheduled_tasks"
                 f" FROM course_task_store GROUP BY user_id",
@@ -361,7 +363,8 @@ async def admin_learning_records(
     try:
         with get_db_session() as conn, conn.cursor() as cur:
             cur.execute(
-                f"SELECT COUNT(*) AS cnt FROM course_task_store t{where_sql}",
+                # B608: fragments are literals; every value is a bound parameter.
+                f"SELECT COUNT(*) AS cnt FROM course_task_store t{where_sql}",  # nosec B608
                 params,
             )
             row = cur.fetchone()
@@ -369,7 +372,8 @@ async def admin_learning_records(
 
             # Project only the fields the table needs — never the whole payload.
             cur.execute(
-                "SELECT t.task_id, t.user_id, t.status, t.message,"
+                # B608: fragments are literals; every value is a bound parameter.
+                "SELECT t.task_id, t.user_id, t.status, t.message,"  # nosec B608
                 " t.started_at, t.updated_at,"
                 " t.payload -> 'progress' AS progress,"
                 " t.payload -> 'finished_at' AS finished_at,"
@@ -596,7 +600,8 @@ async def admin_health(
             with get_db_session() as conn, conn.cursor() as cur:
                 placeholders = ", ".join(["%s"] * len(ACTIVE_TASK_STATUSES))
                 cur.execute(
-                    f"SELECT COUNT(*) AS cnt FROM course_task_store"
+                    # B608: only generated %s placeholders are interpolated; values are bound.
+                    f"SELECT COUNT(*) AS cnt FROM course_task_store"  # nosec B608
                     f" WHERE LOWER(status) IN ({placeholders})",
                     [s.lower() for s in ACTIVE_TASK_STATUSES],
                 )
