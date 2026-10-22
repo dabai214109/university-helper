@@ -98,9 +98,17 @@ class Settings(BaseSettings):
 
     # New-release notice for administrators. The server polls GitHub Releases;
     # set UPDATE_CHECK_ENABLED=false on air-gapped installs.
+    #
+    # This fork publishes tags but no GitHub releases, so the default URL answers
+    # 404 and the notice never appears. That is the safe default: upstream's
+    # release notes come with a `deploy_server.sh --tag` command that installs a
+    # different image set (ghcr.io/sweetcornna) onto a different data volume
+    # than this fork's deploy/compose.yml, so following it would stand up a
+    # second, empty stack instead of updating the running one. Publish a release
+    # on the fork repo to turn the notice on.
     UPDATE_CHECK_ENABLED: bool = True
     UPDATE_CHECK_INTERVAL_SECONDS: int = 6 * 3600
-    UPDATE_CHECK_URL: str = "https://api.github.com/repos/sweetcornna/university-helper/releases/latest"
+    UPDATE_CHECK_URL: str = "https://api.github.com/repos/dabai214109/university-helper/releases/latest"
 
     @field_validator("SECRET_KEY")
     @classmethod

@@ -107,3 +107,27 @@ async def test_results_are_cached_for_the_ttl():
 async def test_long_notes_are_truncated():
     checker = _checker(lambda request: httpx.Response(200, json=_release(body="x" * 5000)))
     assert len((await checker.get_status())["notes"]) == 2000
+
+
+@pytest.mark.asyncio
+async def test_missing_release_404_shows_no_notice():
+    """This fork publishes no GitHub releases, so the default check answers 404.
+
+    That must stay silent: a notice here would carry upstream's
+    `deploy_server.sh --tag` command, which installs ghcr.io/sweetcornna images
+    onto a different data volume than deploy/compose.yml -- a second, empty
+    stack rather than an update of the running one.
+    """
+    checker = _checker(lambda request: httpx.Response(404, json={"message": "Not Found"}))
+    status = await checker.get_status()
+    assert status["latest"] is None
+    assert status["has_update"] is False
+    assert status["commands"] is None
+
+
+def test_settings_do_not_point_the_update_check_at_upstream():
+    """The default URL must target this fork, not the upstream repo."""
+    from app.config import settings
+
+    assert "sweetcornna/university-helper" not in settings.UPDATE_CHECK_URL
+    assert "dabai214109/university-helper" in settings.UPDATE_CHECK_URL
