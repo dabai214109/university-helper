@@ -171,6 +171,68 @@ def test_yanxi_rotates_to_the_next_token_when_the_config_is_invalid():
     assert rotated == ["good"], "失效后必须换到下一个 token 再试"
 
 
+def test_yanxi_survives_a_second_exhaustion_attempt():
+    """第一次用尽后 index 停在 len；第二次换 token 曾越过守卫抛 IndexError。
+
+    那个 IndexError 没人接，直接把调用它的章节整个炸掉 —— 线上表现为一门课
+    28 个章节全部 "Chapter processing crashed"。
+    """
+    provider = _yanxi()
+    provider._conf = {"tokens": "only-expired"}
+    provider._token_index = 0
+    provider._token = "only-expired"
+    expired = _Response(
+        {"code": 0, "data": {"answer": "⚠️此题库配置已经无效 (或被重置)！"}, "message": "请求失败"}
+    )
+
+    with patch(
+        "app.services.course.chaoxing.answer_providers.yanxi.requests.get",
+        return_value=expired,
+    ):
+        assert provider._query(_QUESTION) is None   # 第一次：用尽
+        assert provider._query(_QUESTION) is None   # 第二次：不能抛异常
+        assert provider._query(_QUESTION) is None
+
+    assert provider._tokens_exhausted is True
+
+
+def test_yanxi_stops_retrying_once_the_tokens_are_exhausted():
+    """用尽后不该每题再打一次请求，白白增加延迟。"""
+    provider = _yanxi()
+    provider._conf = {"tokens": "only-expired"}
+    provider._token_index = 0
+    provider._token = "only-expired"
+    expired = _Response(
+        {"code": 0, "data": {"answer": "⚠️此题库配置已经无效 (或被重置)！"}, "message": "请求失败"}
+    )
+
+    with patch(
+        "app.services.course.chaoxing.answer_providers.yanxi.requests.get",
+        return_value=expired,
+    ) as mock_get:
+        provider._query(_QUESTION)
+        calls_after_first = mock_get.call_count
+        provider._query(_QUESTION)
+        provider._query(_QUESTION)
+
+    assert mock_get.call_count == calls_after_first, "用尽后不应再发起请求"
+
+
+def test_load_token_past_the_end_raises_permission_error_not_index_error():
+    """守卫必须用 >=。
+
+    轮换会先自增再取 token，所以「第二次用尽」时下标是 len+1。用 == 判断会
+    放行，于是 token_list[len+1] 抛 IndexError —— 调用方只接 PermissionError，
+    IndexError 就一路冒到章节层。
+    """
+    provider = _yanxi()
+    provider._conf = {"tokens": "a,b"}
+    provider._token_index = 5
+
+    with pytest.raises(PermissionError):
+        provider.load_token()
+
+
 def test_yanxi_reports_exhausted_tokens_instead_of_a_plain_miss():
     """所有 token 都不可用时，日志要能指向真正的原因和操作。"""
     provider = _yanxi()

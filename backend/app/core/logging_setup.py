@@ -108,4 +108,10 @@ class _StdlibSink:  # pragma: no cover
     def __call__(self, message) -> None:
         record = message.record
         logger = logging.getLogger(record["name"] or "loguru")
-        logger.log(record["level"].no, record["message"])
+        # Forward the exception, not just the message. Dropping it here meant
+        # every `logger.exception(...)` in the app printed a one-line summary
+        # with no traceback at all, which made production crashes (e.g. the
+        # per-chapter "Chapter processing crashed") impossible to diagnose.
+        exception = record["exception"]
+        exc_info = (exception.type, exception.value, exception.traceback) if exception is not None else None
+        logger.log(record["level"].no, record["message"], exc_info=exc_info)

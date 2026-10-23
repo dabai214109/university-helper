@@ -15,9 +15,14 @@ class TikuYanxi(Tiku):
         self.api = "https://tk.enncy.cn/query"
         self._token = None
         self._token_index = 0  # token队列计数器
+        self._tokens_exhausted = False
         self._times = 100  # 查询次数剩余, 初始化为100, 查询后校对修正
 
     def _query(self, q_info: dict):
+        if self._tokens_exhausted:
+            # Every token was rejected earlier in this run. Querying again would
+            # only spend a request and add latency before the same answer.
+            return None
         try:
             res = requests.get(
                 self.api,
@@ -84,8 +89,12 @@ class TikuYanxi(Tiku):
 
     def load_token(self):
         token_list = self._conf["tokens"].split(",")
-        if self._token_index == len(token_list):
-            # TOKEN 用完
+        # `>=`, not `==`: rotation increments the index first, so a second
+        # exhaustion attempt arrives here at len+1. With `==` that slipped past
+        # the guard and indexed past the end -> IndexError, which nothing caught,
+        # killing every chapter that needed an answer afterwards.
+        if self._token_index >= len(token_list):
+            self._tokens_exhausted = True
             logger.error("TOKEN用完, 请自行更换再重启脚本")
             raise PermissionError(f"{self.name} TOKEN 已用完, 请更换")
         self._token = token_list[self._token_index]
