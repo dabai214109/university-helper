@@ -12,8 +12,19 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SITE_DIR = REPO_ROOT / "site"
+
+# This fork dropped the marketing site ("chore: drop marketing assets unrelated
+# to deployment"), so every check here has nothing to read. Skip instead of
+# deleting: if `site/` ever returns these run again, and the suite stays green
+# in the meantime without pretending the assertions passed.
+pytestmark = pytest.mark.skipif(
+    not SITE_DIR.exists(),
+    reason="site/ is not part of this fork",
+)
 
 EXPECTED_EXTERNAL_SRI = {
     "https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js": (

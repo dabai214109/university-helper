@@ -289,12 +289,20 @@ def test_vault_rejects_empty_input_and_reports_summary():
     assert summary["uid"] == "9"
 
 
-def test_vault_expires_stale_entries():
+def test_vault_expires_stale_entries(monkeypatch):
     vault = ChaoxingCookieVault()
     vault.set("user-a", {"_uid": "A"})
 
     # Age the entry past the vault's TTL instead of waiting for it.
     vault._entries["user-a"]["updated_at"] -= 8 * 24 * 60 * 60
+
+    # set() also persists the jar, and both get() and summary() fall back to the
+    # store once the in-memory entry is gone. Against a real database (CI has
+    # Postgres) that fallback returns the still-fresh persisted copy, so the
+    # assertions below failed for a reason this test is not about. The in-memory
+    # TTL is what is under test; the persistence path has its own coverage in
+    # test_chaoxing_cookie_vault_persist.py.
+    monkeypatch.setattr(vault, "_restore", lambda user_id: None)
 
     assert vault.get("user-a") is None
     assert vault.summary("user-a")["logged_in"] is False

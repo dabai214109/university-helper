@@ -34,6 +34,11 @@ def _source_deployment_blocks() -> list[tuple[Path, str]]:
         document = path.read_text(encoding="utf-8")
         blocks.append((path, _between(document, start_marker, end_marker)))
 
+    # This fork dropped the marketing site, so there is no wiki page to read.
+    # Skipping just this source keeps the README/DEPLOYMENT assertions running.
+    if not SITE_DEPLOYMENT_SECTION.exists():
+        return blocks
+
     document = SITE_DEPLOYMENT_SECTION.read_text(encoding="utf-8")
     section_start = document.index('<section class="wiki-sec" id="deploy">')
     section = document[section_start : document.index("</section>", section_start)]
