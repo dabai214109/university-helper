@@ -3,6 +3,9 @@ from loguru import logger
 
 from ..answer_base import Tiku
 
+# 响应里出现这些字样时，换 token 才有意义（额度耗尽或配置失效）。
+_TOKEN_UNUSABLE_MARKERS = ("次数不足", "已经无效", "已被重置", "配置过期")
+
 
 class TikuYanxi(Tiku):
     # 言溪题库实现
@@ -57,11 +60,21 @@ class TikuYanxi(Tiku):
             return None
 
         if not res_json["code"]:
-            # 如果是因为TOKEN次数到期, 则更换token
-            if self._times == 0 or "次数不足" in response_answer:
-                logger.info("TOKEN查询次数不足, 将会更换并重新搜题")
+            # 换 token 才能恢复的情况有两种：额度耗尽，以及题库配置本身失效
+            # （被重置/过期）。后者以前不算在这里，于是配置一旦失效，每道题都只
+            # 记一句「未命中」，日志里完全看不出真实原因，也不会去试下一个 token。
+            reason = next((m for m in _TOKEN_UNUSABLE_MARKERS if m in response_answer), "")
+            if self._times == 0 or reason:
+                logger.info(f"{self.name} 当前 Token 不可用（{reason or '额度耗尽'}），尝试更换下一个")
                 self._token_index += 1
-                self.load_token()
+                try:
+                    self.load_token()
+                except PermissionError:
+                    logger.error(
+                        f"{self.name} 所有 Token 均不可用：请到 https://tk.enncy.cn/ 个人中心"
+                        " 重新复制题库配置，粘贴后需新建任务才会生效"
+                    )
+                    return None
                 # 重新查询
                 return self._query(q_info)
             logger.error(f"{self.name}查询失败: provider 返回未命中")
