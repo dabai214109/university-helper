@@ -147,6 +147,15 @@ def _parse_course_selector(raw: str) -> tuple[str, str | None, str | None]:
     return parts[0], None, None
 
 
+def _as_positive_int(value: object) -> int:
+    """Best-effort positive int; 0 when unset or malformed."""
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
 def _course_label(course: dict[str, Any]) -> str:
     return (
         str(course.get("title") or "").strip()
@@ -266,6 +275,14 @@ class ChaoxingLearningManager:
                         "schedule_args": schedule_args_dict,
                     }
             else:
+                # Manual runs carry no schedule block, so the dispatcher cannot
+                # read schedule["actual_stop_at"] for them. Record the single-run
+                # deadline on the task itself; without this the cap was silently
+                # ignored for every manually started run.
+                max_duration_min = _as_positive_int((payload or {}).get("max_duration_min"))
+                deadline_at = (
+                    (datetime.now(UTC) + timedelta(minutes=max_duration_min)).isoformat() if max_duration_min else None
+                )
                 task_state: dict[str, Any] = {
                     "task_id": task_id,
                     "user_id": user_id,
@@ -281,6 +298,7 @@ class ChaoxingLearningManager:
                     "_log_cursor": 0,
                     "_pause_event": pause_event,
                     "_stop_event": stop_event,
+                    "deadline_at": deadline_at,
                 }
             self._tasks[task_id] = task_state
             cleanup_task_records(self._tasks)
@@ -1230,7 +1248,10 @@ class ChaoxingLearningManager:
                 status = str(task.get("status") or "").lower()
                 schedule = task.get("schedule")
                 if not isinstance(schedule, dict):
-                    continue
+                    # A manually started run has no schedule block at all. It must
+                    # still reach the expiry check below, which reads the
+                    # task-level deadline recorded at creation.
+                    schedule = {}
 
                 task_id = str(task.get("task_id") or "")
                 uid = str(task.get("user_id") or "")
@@ -1369,6 +1390,13 @@ class ChaoxingLearningManager:
                                 )
                             except (ValueError, TypeError, OverflowError):
                                 pass
+                        # The single-run cap applies to one-shot scheduled runs
+                        # too: use it when no wall-clock stop was given, and take
+                        # the earlier of the two so neither limit can be exceeded.
+                        cap_minutes = _as_positive_int(schedule.get("max_duration_min"))
+                        if cap_minutes:
+                            by_cap = datetime.now(UTC) + timedelta(minutes=cap_minutes)
+                            actual_stop = by_cap if actual_stop is None else min(actual_stop, by_cap)
                         schedule["actual_stop_at"] = actual_stop.isoformat() if actual_stop else None
 
                         task["status"] = "pending"
@@ -1409,7 +1437,7 @@ class ChaoxingLearningManager:
                         continue
 
                 if status in ("running", "pending"):
-                    actual_stop_raw = schedule.get("actual_stop_at")
+                    actual_stop_raw = schedule.get("actual_stop_at") or task.get("deadline_at")
                     if actual_stop_raw and str(actual_stop_raw).strip():
                         try:
                             actual_stop_dt = datetime.fromisoformat(str(actual_stop_raw).strip().replace("Z", "+00:00"))

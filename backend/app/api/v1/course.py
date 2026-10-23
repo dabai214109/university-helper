@@ -333,7 +333,11 @@ async def start_course_learning(
             payload["repeat"] = request.repeat
             payload["time_of_day"] = request.time_of_day
             payload["anchor_date"] = request.anchor_date
-            payload["max_duration_min"] = request.max_duration_min
+        # The single-run cap is not a recurring-only setting: the UI shows it for
+        # every task kind and defaults it to 120 minutes. Dropping it here meant a
+        # manually started run could never hit its cap, because the engine had no
+        # idea one had been requested.
+        payload["max_duration_min"] = request.max_duration_min
         # 已有活跃任务时不要直接 409：把新任务挂到它的链尾，等它结束后自动开始。
         # 这是用户明确要的行为（「继续添加队列任务到现有任务之后」），而且保留
         # 「同时只跑一个」的约束，避免同账号并发触犯风控。

@@ -583,3 +583,134 @@ def test_task_before_max_duration_keeps_running(monkeypatch):
     assert task["status"] == "running"
     assert not stop_event.is_set()
     assert pause_event.is_set()
+
+
+# ── max_duration_min: manual runs must honour the cap too ────────────────────
+#
+# The cap used to be attached to the payload only for recurring tasks, and even
+# then a manual run had no `schedule` block, so the dispatcher skipped it. The
+# result: "单次上限" was displayed for every task kind but enforced for none of
+# the manually started ones -- a run could keep going all night.
+
+
+def _manual_run(manager, *, task_id="manual-1", deadline_in_minutes=-5):
+    """A running manual task: no schedule block, only a task-level deadline."""
+    import threading
+
+    stop_event = threading.Event()
+    pause_event = threading.Event()
+    pause_event.set()
+    manager._tasks[task_id] = {
+        "task_id": task_id,
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "running",
+        "message": "Learning course 1/1",
+        "current_task": "course:测试课程",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "_stop_event": stop_event,
+        "_pause_event": pause_event,
+        "deadline_at": (datetime.now(UTC) + timedelta(minutes=deadline_in_minutes)).isoformat(),
+    }
+    return manager._tasks[task_id], stop_event, pause_event
+
+
+def test_a_manual_run_records_its_deadline(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _no_worker(monkeypatch)
+
+    task_id = manager.start_task("u1", {"platform": "chaoxing", "max_duration_min": 90})
+
+    task = manager._tasks[task_id]
+    assert not task.get("schedule"), "手动任务本就没有 schedule 块"
+    assert task["deadline_at"], "截止时间必须记在任务上，否则调度循环看不到它"
+    remaining = (datetime.fromisoformat(task["deadline_at"]) - datetime.now(UTC)).total_seconds() / 60
+    assert 89 <= remaining <= 91
+
+
+def test_a_manual_run_without_a_cap_has_no_deadline(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _no_worker(monkeypatch)
+
+    task_id = manager.start_task("u1", {"platform": "chaoxing"})
+
+    assert manager._tasks[task_id]["deadline_at"] is None
+
+
+def test_a_manual_run_past_its_deadline_is_ended(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    task, stop_event, _pause = _manual_run(manager, deadline_in_minutes=-5)
+
+    manager.dispatch_scheduled_tasks()
+
+    assert task["status"] == "cancelled", "超过单次上限的手动任务必须被结束"
+    assert stop_event.is_set(), "还要通知 worker 线程退出"
+
+
+def test_a_manual_run_before_its_deadline_keeps_running(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    task, _stop, _pause = _manual_run(manager, deadline_in_minutes=30)
+
+    manager.dispatch_scheduled_tasks()
+
+    assert task["status"] == "running"
+
+
+def _scheduled_task(manager, *, stop_at=None, max_duration_min=60):
+    manager._tasks["sched-1"] = {
+        "task_id": "sched-1",
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "scheduled",
+        "message": "Scheduled",
+        "current_task": "scheduled",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "credentials": {"username": "u", "password": "p", "tiku_config": {}},
+        "schedule_args": {"platform": "chaoxing", "course_ids": ["1"]},
+        "schedule": {
+            "repeat": "once",
+            "start_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+            "stop_at": stop_at,
+            # Already due.
+            "fire_at": (datetime.now(UTC) - timedelta(seconds=5)).isoformat(),
+            "start_jitter_min": 0,
+            "stop_jitter_min": 0,
+            "max_duration_min": max_duration_min,
+            "actual_stop_at": None,
+        },
+    }
+    return manager._tasks["sched-1"]
+
+
+def test_a_scheduled_run_applies_the_cap_when_no_stop_at_was_given(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _no_worker(monkeypatch)
+    task = _scheduled_task(manager, stop_at=None, max_duration_min=60)
+
+    manager.dispatch_scheduled_tasks()
+
+    remaining = (datetime.fromisoformat(task["schedule"]["actual_stop_at"]) - datetime.now(UTC)).total_seconds() / 60
+    assert 59 <= remaining <= 61, "没有 stop_at 时，单次上限必须自己算出截止时间"
+
+
+def test_the_earlier_of_stop_at_and_the_cap_wins(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _no_worker(monkeypatch)
+    # stop_at 只有 10 分钟，上限 60 分钟 → 取 10 分钟
+    stop_at = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    task = _scheduled_task(manager, stop_at=stop_at, max_duration_min=60)
+
+    manager.dispatch_scheduled_tasks()
+
+    remaining = (datetime.fromisoformat(task["schedule"]["actual_stop_at"]) - datetime.now(UTC)).total_seconds() / 60
+    assert 9 <= remaining <= 11, "两个限制都不能被突破，取更早的那个"
