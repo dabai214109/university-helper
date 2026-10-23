@@ -72,6 +72,25 @@ jobs:
           cache-from: type=gha,scope=app
           cache-to: type=gha,mode=max,scope=app
 
+      # Servers behind a blocked CDN can reach github.com but not the registry's
+      # blob host, so `docker pull` hangs on the layers even though the image
+      # exists. Export a plain tar.gz here: it travels over github.com's release
+      # asset path instead, and needs neither Docker nor a build on the server
+      # (a 1 GB box cannot build this).
+      - name: Export image for offline install
+        run: |
+          docker pull --platform linux/amd64 "${{ env.APP_IMAGE }}:latest"
+          docker save "${{ env.APP_IMAGE }}:latest" | gzip -1 > app-image.tar.gz
+          ls -lh app-image.tar.gz
+
+      - name: Upload app image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: app-image
+          path: app-image.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
   build-web:
     name: build web image
     runs-on: ubuntu-latest
@@ -110,6 +129,20 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
+      - name: Export image for offline install
+        run: |
+          docker pull --platform linux/amd64 "${{ env.WEB_IMAGE }}:latest"
+          docker save "${{ env.WEB_IMAGE }}:latest" | gzip -1 > web-image.tar.gz
+          ls -lh web-image.tar.gz
+
+      - name: Upload web image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-image
+          path: web-image.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
   # 构建完成后给一个明确结论，省得去翻日志
   summary:
     name: summary
@@ -127,3 +160,14 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**首次使用前**：把这两个 package 的可见性改成 Public，" >> "$GITHUB_STEP_SUMMARY"
           echo "否则服务器 \`docker pull\` 会返回 401。" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 服务器拉不动 GHCR 时" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "本次运行底部有两个 artifact：\`app-image\` / \`web-image\`（各含一个 .tar.gz）。" >> "$GITHUB_STEP_SUMMARY"
+          echo "浏览器下载 → 宝塔上传到 \`/www/wwwroot/uh/images/\` → 服务器执行：" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "gunzip -c app-image.tar.gz | docker load" >> "$GITHUB_STEP_SUMMARY"
+          echo "gunzip -c web-image.tar.gz | docker load" >> "$GITHUB_STEP_SUMMARY"
+          echo "docker compose up -d --pull never" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "详见仓库根目录的 \`镜像上传部署教程.md\`。" >> "$GITHUB_STEP_SUMMARY"
