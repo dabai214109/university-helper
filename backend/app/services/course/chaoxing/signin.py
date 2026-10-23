@@ -53,6 +53,11 @@ COURSE_LIST_REFERER = (
     "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction" "?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans"
 )
 ACTIVE_LIST_URL = "https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist"
+# How long a failed vault rebuild is remembered. /login-status is polled, and an
+# unusable jar would otherwise be re-validated against Chaoxing on every poll.
+# Long enough to stop the hammering, short enough that re-scanning still works
+# without waiting: a successful scan installs a client and bypasses this.
+_REBUILD_RETRY_SECONDS = 60.0
 PPT_ACTIVE_INFO_URL = "https://mobilelearn.chaoxing.com/v2/apis/active/getPPTActiveInfo"
 PRE_SIGN_URL = "https://mobilelearn.chaoxing.com/newsign/preSign"
 PPT_SIGN_URL = "https://mobilelearn.chaoxing.com/pptSign/stuSignajax"
@@ -1261,6 +1266,8 @@ class ChaoxingSigninManager:
     def __init__(self):
         self._lock = threading.Lock()
         self._clients: dict[str, ChaoxingSigninClient] = {}
+        # user_id -> monotonic deadline before which vault rebuild is not retried.
+        self._rebuild_failed_at: dict[str, float] = {}
         self._history: dict[str, list[dict[str, Any]]] = {}
         self._tasks: dict[str, dict[str, Any]] = {}
         self._loaded_task_users: set[str] = set()
@@ -1286,11 +1293,16 @@ class ChaoxingSigninManager:
         return result
 
     def has_client(self, user_id: str) -> bool:
-        return self._get_client(user_id) is not None
+        # Rebuilds from the vault when memory is empty, so /login-status reports
+        # a real session instead of a cookie jar that cannot serve any request.
+        return self._ensure_client(user_id) is not None
 
     def logout(self, user_id: str) -> None:
+        normalized = str(user_id or "").strip()
         with self._lock:
-            self._clients.pop(str(user_id or "").strip(), None)
+            self._clients.pop(normalized, None)
+            # Drop the retry block too: a fresh login must not wait it out.
+            self._rebuild_failed_at.pop(normalized, None)
 
     def ensure_login(self, user_id: str, username: str, password: str = "") -> dict[str, Any]:
         """Log in, falling back to a QR-scanned cookie jar when no password is given.
@@ -1323,17 +1335,62 @@ class ChaoxingSigninManager:
         with self._lock:
             return self._clients.get(user_id)
 
+    def _ensure_client(self, user_id: str) -> ChaoxingSigninClient | None:
+        """Return the live client, rebuilding it from the vault when memory is empty.
+
+        The client registry is in-process only, so every container restart (a
+        deploy, a crash, a reboot) emptied it while the encrypted cookie jar
+        survived in the database. Read paths then reported "logged in" from the
+        vault summary but produced no courses, and the page fell back to the
+        login card until the user re-scanned. Rebuild once, lazily, on the first
+        read after a restart.
+
+        A failed rebuild is remembered for a short while: /login-status is polled,
+        and re-validating the same dead jar on every poll would hammer Chaoxing
+        for no benefit. The jar itself is left alone rather than cleared -- it may
+        have been replaced by a fresh scan between the read and the failure.
+        """
+        client = self._get_client(user_id)
+        if client is not None:
+            return client
+
+        now = time.monotonic()
+        retry_after = self._rebuild_failed_at.get(user_id)
+        if retry_after is not None and now < retry_after:
+            return None
+
+        cookies = chaoxing_cookie_vault.get(user_id)
+        if not cookies:
+            return None
+        try:
+            result = self.login_with_cookie_jar(user_id, cookies)
+        except Exception:
+            logger.warning("chaoxing: vault restore failed for user=%s", user_id, exc_info=True)
+            self._remember_rebuild_failure(user_id, now)
+            return None
+        if not result.get("status"):
+            logger.info("chaoxing: stored session is not usable for user=%s", user_id)
+            self._remember_rebuild_failure(user_id, now)
+            return None
+
+        self._rebuild_failed_at.pop(user_id, None)
+        return self._get_client(user_id)
+
+    def _remember_rebuild_failure(self, user_id: str, now: float) -> None:
+        with self._lock:
+            self._rebuild_failed_at[user_id] = now + _REBUILD_RETRY_SECONDS
+
     def get_client(self, user_id: str) -> ChaoxingSigninClient | None:
         return self._get_client(user_id)
 
     def get_courses(self, user_id: str) -> list[dict[str, Any]]:
-        client = self._get_client(user_id)
+        client = self._ensure_client(user_id)
         if not client:
             return []
         return client.get_courses()
 
     def get_classes(self, user_id: str) -> list[dict[str, Any]]:
-        client = self._get_client(user_id)
+        client = self._ensure_client(user_id)
         if not client:
             return []
         return client.get_class_subjects()
