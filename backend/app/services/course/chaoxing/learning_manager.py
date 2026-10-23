@@ -445,19 +445,25 @@ class ChaoxingLearningManager:
 
         队列信息存在**前一个任务的** `queued_next` 字段里，跟着那个任务一起
         持久化 —— 重启后恢复任务时，排队项也一起回来。
+
+        排队项同时登记成一条 status="queued" 的真实任务记录：前端拿到这个 id
+        后要能查到它、能取消它。以前只把 id 塞进锚任务的 queued_next，于是
+        /resume、/start-now 一律回 "Task not found" —— 那个 id 在内存和数据库
+        里都不存在。
         """
         now = _utc_now_iso()
         child_id = uuid4().hex
 
         with self._lock:
             cleanup_task_records(self._tasks)
-            # 找到该用户当前活跃/定时的任务，作为链表头。
+            # 只挂在**活跃**任务后面。周期模板不算：它没有 worker，永远不会
+            # 进入终态，挂在它下面的任务也就永远不会被拉起来。这里放宽到模板
+            # 会让「准入检查时活跃任务刚好结束」的竞态变成永久卡死。
             anchor = None
             for task in self._tasks.values():
                 if str(task.get("user_id") or "").strip() != user_id:
                     continue
-                status = task.get("status")
-                if is_active_status(status) or is_recurring_status(status):
+                if is_active_status(task.get("status")):
                     anchor = task
                     break
 
@@ -467,6 +473,7 @@ class ChaoxingLearningManager:
                 # 返回 None 让调用方回退。
                 return None
 
+            anchor_id = str(anchor.get("task_id") or "").strip()
             queue_entry: dict[str, Any] = {
                 "task_id": child_id,
                 "payload": dict(payload or {}),
@@ -479,14 +486,39 @@ class ChaoxingLearningManager:
             chain.append(queue_entry)
             anchor["queued_next"] = chain
             anchor["updated_at"] = now
-            persist_request = self._prepare_persist_locked(anchor)
+            anchor_request = self._prepare_persist_locked(anchor)
 
-        if persist_request:
-            self._persist_task_state(*persist_request)
+            # 可寻址的排队记录。不复制 payload：真正的启动参数留在锚任务的
+            # queued_next 里，避免凭据在多处重复落库。
+            queued_task: dict[str, Any] = {
+                "task_id": child_id,
+                "user_id": user_id,
+                "platform": "chaoxing",
+                "status": "queued",
+                "message": f"Queued behind {anchor_id}",
+                "current_task": "queued",
+                "progress": self._default_progress(),
+                "created_at": now,
+                "started_at": now,
+                "updated_at": now,
+                "logs": [],
+                "_log_cursor": 0,
+                "_pause_event": threading.Event(),
+                "_stop_event": threading.Event(),
+                "queue_anchor": anchor_id,
+            }
+            self._tasks[child_id] = queued_task
+            queued_request = self._prepare_persist_locked(queued_task)
+            position = len(chain)
+
+        if anchor_request:
+            self._persist_task_state(*anchor_request)
+        if queued_request:
+            self._persist_task_state(*queued_request)
 
         self._append_task_log(
-            anchor.get("task_id") or "",
-            f"Task queued behind this one (position {len(chain)}): {child_id}",
+            anchor_id,
+            f"Task queued behind this one (position {position}): {child_id}",
             "info",
         )
         return child_id
@@ -497,6 +529,10 @@ class ChaoxingLearningManager:
         调用点在 `_run_task_worker_guarded` 的 finally，即该任务进入终态之后。
         只启动**第一个**，其余的继续挂在它自己的链上 —— 这样天然是 FIFO，
         而且每个排队项都会在启动前重新走一遍准入检查（用户可能中途取消了）。
+
+        排队项在入队时已经登记成一条 `status="queued"` 的任务，所以这里直接把
+        那条记录提升成运行中的任务，而不是另起一个新的 id：前端从头看到的都是
+        同一个 id，排队卡片会就地变成进行中的任务。
         """
         next_entry: dict[str, Any] | None = None
 
@@ -522,6 +558,10 @@ class ChaoxingLearningManager:
         queued_payload = next_entry.get("payload") or {}
         if not isinstance(queued_payload, dict):
             return
+        payload = dict(queued_payload)
+        payload.pop("queue_behind", None)
+        queued_task_id = str(next_entry.get("task_id") or "").strip()
+
         # 排队项自己可能还带着后继（用户连加多个），先摘出来交给新任务
         remaining: list[dict[str, Any]] = []
         with self._lock:
@@ -531,31 +571,188 @@ class ChaoxingLearningManager:
                 if isinstance(leftover, list):
                     remaining = list(leftover)
 
-        payload = dict(queued_payload)
-        payload.pop("queue_behind", None)
-
         try:
-            new_task_id = self.start_task(user_id, payload)
-        except TaskAlreadyActiveError:
-            logger.warning("queued task could not start (another task became active): user=%s", user_id)
-            return
+            promoted = self._promote_queued_task(queued_task_id, user_id, payload)
         except Exception:
             logger.exception("queued task failed to start: user=%s", user_id)
             return
+        if not promoted:
+            # 另一个任务在收尾这段时间里变成了活跃状态。把排队项放回链头，
+            # 等那个任务结束时再试，别丢。
+            self._requeue_front(task_id, user_id, next_entry)
+            return
 
         if remaining:
+            requests: list[Any] = []
             with self._lock:
-                new_task = self._tasks.get(new_task_id)
+                new_task = self._tasks.get(queued_task_id)
                 if new_task is not None:
                     new_task["queued_next"] = remaining
                     new_task["updated_at"] = _utc_now_iso()
-                    pr = self._prepare_persist_locked(new_task)
-                else:  # pragma: no cover - defensive
-                    pr = None
-            if pr:
-                self._persist_task_state(*pr)
+                    request = self._prepare_persist_locked(new_task)
+                    if request:
+                        requests.append(request)
+                # Re-point the followers at the new head and persist, otherwise
+                # after a restart they would still name the finished anchor.
+                for entry in remaining:
+                    child = self._tasks.get(str(entry.get("task_id") or ""))
+                    if child is None or child.get("status") != "queued":
+                        continue
+                    child["queue_anchor"] = queued_task_id
+                    child["updated_at"] = _utc_now_iso()
+                    request = self._prepare_persist_locked(child)
+                    if request:
+                        requests.append(request)
+            for request in requests:
+                self._persist_task_state(*request)
 
-        self._append_task_log(new_task_id, f"Started from queue (behind {task_id})", "info")
+        self._append_task_log(queued_task_id, f"Started from queue (behind {task_id})", "info")
+
+    def _promote_queued_task(self, task_id: str, user_id: str, payload: dict[str, Any]) -> bool:
+        """Turn a `queued` record into a running task, keeping its id.
+
+        Returns False when the user still has an active task, in which case the
+        caller puts the entry back at the head of the chain.
+        """
+        if not task_id:
+            return False
+        with self._lock:
+            queued = self._tasks.get(task_id)
+            if queued is None or str(queued.get("user_id") or "").strip() != user_id:
+                return False
+            if queued.get("status") != "queued":
+                # Cancelled (or already promoted) while it sat in the chain.
+                return True
+            if any(
+                str(task.get("user_id") or "").strip() == user_id and is_active_status(task.get("status"))
+                for task in self._tasks.values()
+            ):
+                return False
+            queued["status"] = "pending"
+            queued["message"] = "Task created"
+            queued["current_task"] = "preparing"
+            queued["started_at"] = _utc_now_iso()
+            queued["updated_at"] = queued["started_at"]
+            queued.pop("queue_anchor", None)
+            request = self._prepare_persist_locked(queued)
+        if request:
+            try:
+                self._persist_task_state(*request)
+            except Exception:
+                logger.exception("failed to persist promoted queued task: task_id=%s", task_id)
+                return False
+        try:
+            threading.Thread(
+                target=self._run_task_worker_guarded,
+                args=(task_id, user_id, dict(payload or {})),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self._fail_task(task_id, THREAD_START_FAILURE_MESSAGE)
+            logger.exception("queued worker failed to start: task_id=%s err=%s", task_id, exc)
+            return False
+        return True
+
+    def _requeue_front(self, anchor_id: str, user_id: str, entry: dict[str, Any]) -> None:
+        """Put an entry back at the head of the anchor's chain after a failed promote."""
+        with self._lock:
+            anchor = self._tasks.get(anchor_id)
+            if anchor is None or str(anchor.get("user_id") or "").strip() != user_id:
+                return
+            chain = anchor.get("queued_next")
+            if not isinstance(chain, list):
+                chain = []
+            chain.insert(0, entry)
+            anchor["queued_next"] = chain
+            anchor["updated_at"] = _utc_now_iso()
+            request = self._prepare_persist_locked(anchor)
+        if request:
+            self._persist_task_state(*request)
+
+    def _cancel_stalled_queued_locked(self) -> list[Any]:
+        """Cancel queued records whose anchor can no longer start them.
+
+        Called with ``self._lock`` held, right after tasks are loaded from the
+        store. A queued record only starts when its anchor's worker finishes, so
+        an anchor that reached a terminal state while the service was down leaves
+        its children parked at ``queued`` with nothing to wake them. Cancelling
+        with an explicit reason beats an entry the user can never run or clear.
+        """
+        requests: list[Any] = []
+        now = _utc_now_iso()
+        for task in list(self._tasks.values()):
+            if task.get("status") != "queued":
+                continue
+            anchor_id = str(task.get("queue_anchor") or "").strip()
+            anchor = self._tasks.get(anchor_id) if anchor_id else None
+            # Only an anchor that can actually finish drains its chain. A
+            # recurring template is not one of those: it never enters a terminal
+            # state, so anything queued behind it would wait forever.
+            if anchor is not None and is_active_status(anchor.get("status")):
+                continue
+            task.pop("queue_anchor", None)
+            task["status"] = "cancelled"
+            task["message"] = "Queued task dropped: the task it was queued behind is gone"
+            task["current_task"] = "cancelled"
+            task["updated_at"] = now
+            task.setdefault("finished_at", now)
+            request = self._prepare_persist_locked(task)
+            if request:
+                requests.append(request)
+        return requests
+
+    def _detach_queued_locked(self, queued: dict[str, Any]) -> list[Any]:
+        """Splice a cancelled queued record out of its anchor's chain.
+
+        Called with ``self._lock`` held. Returns the anchor's persist request so
+        the caller can write it after releasing the lock.
+        """
+        child_id = str(queued.get("task_id") or "").strip()
+        anchor_id = str(queued.get("queue_anchor") or "").strip()
+        queued.pop("queue_anchor", None)
+        anchor = self._tasks.get(anchor_id) if anchor_id else None
+        if anchor is None or not child_id:
+            return []
+        chain = anchor.get("queued_next")
+        if not isinstance(chain, list):
+            return []
+        kept = [entry for entry in chain if str(entry.get("task_id") or "").strip() != child_id]
+        if len(kept) == len(chain):
+            return []
+        anchor["queued_next"] = kept
+        anchor["updated_at"] = _utc_now_iso()
+        request = self._prepare_persist_locked(anchor)
+        return [request] if request else []
+
+    def _cancel_queued_children_locked(self, anchor: dict[str, Any]) -> list[Any]:
+        """Cancel every queued record hanging off an anchor that is being stopped.
+
+        Called with ``self._lock`` held. Without this, cancelling a chain head
+        left its children at status ``queued`` forever: their only trigger is
+        the anchor's worker finishing, which a cancelled anchor never reaches.
+        """
+        chain = anchor.get("queued_next")
+        if not isinstance(chain, list) or not chain:
+            return []
+        requests: list[Any] = []
+        now = _utc_now_iso()
+        for entry in chain:
+            child_id = str(entry.get("task_id") or "").strip()
+            child = self._tasks.get(child_id) if child_id else None
+            if child is None or child.get("status") != "queued":
+                continue
+            child.pop("queue_anchor", None)
+            child["status"] = "cancelled"
+            child["message"] = "Cancelled with the task it was queued behind"
+            child["current_task"] = "cancelled"
+            child["updated_at"] = now
+            child.setdefault("finished_at", now)
+            request = self._prepare_persist_locked(child)
+            if request:
+                requests.append(request)
+        # The caller snapshots the anchor itself, so only clear the chain here.
+        anchor["queued_next"] = []
+        return requests
 
     def list_tasks(self, user_id: str) -> list[dict[str, Any]]:
         self._ensure_tasks_loaded_for_user(user_id)
@@ -604,7 +801,10 @@ class ChaoxingLearningManager:
             if not task or str(task.get("user_id")) != normalized_user_id:
                 return {"status": "error", "message": "Task not found", "code": "not_found"}
             status = str(task.get("status") or "").lower()
-            if is_active_status(status) or is_recurring_status(status):
+            # A queued entry is refused too: hiding it would drop it from the list
+            # while leaving it in the anchor's chain, so it would later start with
+            # nothing on screen to explain where it came from.
+            if is_active_status(status) or is_recurring_status(status) or status == "queued":
                 return {
                     "status": "error",
                     "message": "Task is still active: stop it before removing",
@@ -667,6 +867,12 @@ class ChaoxingLearningManager:
                     "message": "Scheduled task: use stop or reschedule",
                     "code": "invalid_status",
                 }
+            if task.get("status") == "queued":
+                return {
+                    "status": "error",
+                    "message": "Queued task: nothing is running yet; stop it to cancel",
+                    "code": "invalid_status",
+                }
             if is_recurring_status(task.get("status")):
                 # A template has no run in flight to pause; pausing it would
                 # overwrite the `recurring` status and silently destroy the
@@ -701,6 +907,12 @@ class ChaoxingLearningManager:
                 return {"status": "error", "message": "Task not found"}
             if task.get("status") in {"completed", "failed", "error", "cancelled"}:
                 return {"status": task.get("status", "completed"), "message": "Task already finished"}
+            if task.get("status") == "queued":
+                return {
+                    "status": "error",
+                    "message": "Queued task: it starts when the running task finishes; stop it to cancel",
+                    "code": "invalid_status",
+                }
             if is_recurring_status(task.get("status")):
                 # "Resuming" a template would flip it to `running`, which the
                 # dispatcher no longer recognises as a schedule.
@@ -730,13 +942,29 @@ class ChaoxingLearningManager:
             self._load_task_from_store(normalized_user_id, normalized_task_id)
         persist_request = None
         is_scheduled_cancel = False
+        # Snapshots taken under the lock for records other than the target
+        # (the anchor chain, the queued children). Written after the lock is
+        # released, because _persist_task_state talks to the database.
+        extra_requests: list[Any] = []
         with self._lock:
             task = self._tasks.get(normalized_task_id)
             if not task or str(task.get("user_id")) != normalized_user_id:
                 return {"status": "error", "message": "Task not found"}
             if task.get("status") in {"completed", "failed", "error", "cancelled"}:
                 return {"status": task.get("status", "completed"), "message": "Task already finished"}
-            if task.get("status") == "scheduled" or is_recurring_status(task.get("status")):
+            if task.get("status") == "queued":
+                # A queued task has no worker to stop: cancel the record and
+                # splice it out of the anchor's chain so it never starts.
+                extra_requests.extend(self._detach_queued_locked(task))
+                task["status"] = "cancelled"
+                task["message"] = "Queued task cancelled"
+                task["current_task"] = "cancelled"
+                task["updated_at"] = _utc_now_iso()
+                task.setdefault("finished_at", task["updated_at"])
+                persist_request = self._prepare_persist_locked(task)
+                is_scheduled_cancel = True
+                cancel_message = task["message"]
+            elif task.get("status") == "scheduled" or is_recurring_status(task.get("status")):
                 # Both a pending one-shot task and a recurring template are
                 # "waiting" states: cancelling them is a state change, not a
                 # cooperative stop of a running worker. This is also the only way
@@ -747,6 +975,7 @@ class ChaoxingLearningManager:
                 task["current_task"] = "cancelled"
                 task["updated_at"] = _utc_now_iso()
                 task.setdefault("finished_at", task["updated_at"])
+                extra_requests.extend(self._cancel_queued_children_locked(task))
                 persist_request = self._prepare_persist_locked(task)
                 is_scheduled_cancel = True
                 cancel_message = task["message"]
@@ -767,6 +996,8 @@ class ChaoxingLearningManager:
                 persist_request = self._prepare_persist_locked(task)
         if persist_request:
             self._persist_task_state(*persist_request)
+        for request in extra_requests:
+            self._persist_task_state(*request)
         if is_scheduled_cancel:
             self._append_task_log(task_id, cancel_message, "warning")
             return {"status": "cancelled", "message": cancel_message}
@@ -1939,7 +2170,9 @@ class ChaoxingLearningManager:
     def _public_view(task: dict[str, Any]) -> dict[str, Any]:
         """Return API-safe view: drop private keys, credentials, and schedule_args."""
         return {
-            k: v for k, v in task.items() if not str(k).startswith("_") and k not in ("credentials", "schedule_args")
+            k: v
+            for k, v in task.items()
+            if not str(k).startswith("_") and k not in ("credentials", "schedule_args", "queue_anchor")
         }
 
     @staticmethod
@@ -2156,6 +2389,9 @@ class ChaoxingLearningManager:
             self._merge_task_from_store(item, now=now)
         with self._lock:
             cleanup_task_records(self._tasks)
+            stalled_requests = self._cancel_stalled_queued_locked()
+        for request in stalled_requests:
+            self._persist_task_state(*request)
 
 
 learning_manager = ChaoxingLearningManager()

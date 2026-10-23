@@ -9,6 +9,9 @@ const ACTIVE_STATUSES = new Set([
   'cancelling',
   'scheduled',
   'recurring',
+  // A queued entry is still pending work: the backend refuses to hide it and
+  // its only meaningful action is to cancel it.
+  'queued',
 ])
 
 const isActive = (status) => ACTIVE_STATUSES.has(String(status || '').toLowerCase())
@@ -16,6 +19,7 @@ const isActive = (status) => ACTIVE_STATUSES.has(String(status || '').toLowerCas
 const STATUS_LABELS = {
   running: '进行中',
   pending: '排队中',
+  queued: '排队等待中',
   paused: '已暂停',
   cancelling: '取消中',
   scheduled: '定时中',
@@ -28,6 +32,7 @@ const STATUS_LABELS = {
 function TaskRow({ task, selected, onRestore, onRemove, removing }) {
   const status = String(task.status || '').toLowerCase()
   const active = isActive(status)
+  const queued = status === 'queued'
   const label = STATUS_LABELS[status] || task.status || '未知'
 
   return (
@@ -53,10 +58,18 @@ function TaskRow({ task, selected, onRestore, onRemove, removing }) {
             aria-label={`恢复任务 ${task.task_id}`}
             aria-pressed={selected}
             onClick={() => onRestore(task.task_id)}
-            className={`min-h-[36px] cursor-pointer rounded-lg border px-3 text-xs font-medium transition-colors ${
-              selected
+            disabled={queued}
+            title={queued ? '排队中：前一个任务结束后会自动开始，要取消请直接停止任务' : undefined}
+            className={`min-h-[36px] rounded-lg border px-3 text-xs font-medium transition-colors ${
+              queued
+                ? 'cursor-not-allowed border-border bg-surface text-text-muted'
+                : 'cursor-pointer'
+            } ${
+              !queued && selected
                 ? 'border-primary bg-primary text-white'
-                : 'border-border bg-surface text-text/80 hover:border-primary/40 hover:bg-surface-hover'
+                : !queued
+                  ? 'border-border bg-surface text-text/80 hover:border-primary/40 hover:bg-surface-hover'
+                  : ''
             }`}
           >
             恢复

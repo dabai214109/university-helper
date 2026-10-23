@@ -414,8 +414,14 @@ def test_queue_behind_attaches_to_the_active_task(monkeypatch):
     chain = manager._tasks["t1"].get("queued_next")
     assert isinstance(chain, list) and len(chain) == 1
     assert chain[0]["task_id"] == queued_id
-    # 排队项本身还没有任务记录（它还不是一个 running task）
-    assert queued_id not in manager._tasks
+
+    # 排队项必须是一条可寻址的真实记录。以前只有 id 挂在链上，于是 /resume
+    # 和 /start-now 一律回 "Task not found"（那个 id 哪儿都不存在）。
+    queued_task = manager._tasks[queued_id]
+    assert queued_task["status"] == "queued"
+    assert queued_task["user_id"] == "u1"
+    assert queued_task["queue_anchor"] == "t1"
+    assert "payload" not in queued_task, "启动参数留在链上，避免凭据重复落库"
 
 
 def test_queue_behind_appends_in_order(monkeypatch):
@@ -456,21 +462,187 @@ def test_finishing_a_task_starts_the_next_queued(monkeypatch):
     queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
     assert manager._tasks["t1"]["queued_next"][0]["task_id"] == queued
 
-    started: list[str] = []
-    real_start = manager.start_task
+    started: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        manager,
+        "_run_task_worker_guarded",
+        lambda task_id, user_id, payload: started.append((task_id, user_id)),
+    )
+    # 真实调用点在 worker 的 finally 里，此时锚任务已经是终态。
+    manager._tasks["t1"]["status"] = "completed"
 
-    def spy(uid, payload):
-        started.append(uid)
-        # 不要再走排队分支，否则会因为 t1 仍存在而再次入队
-        payload = {k: v for k, v in payload.items() if k != "queue_behind"}
-        return real_start(uid, payload)
-
-    monkeypatch.setattr(manager, "start_task", spy)
     manager._start_next_queued("t1", "u1")
 
-    assert started == ["u1"], "队列里的任务应该被启动一次"
+    # 同一个 id 就地提升，不再另起一个新任务：前端看到的排队卡片直接变成进行中。
+    assert started == [(queued, "u1")], "队列里的任务应该被启动一次"
+    assert manager._tasks[queued]["status"] == "pending"
+    assert "queue_anchor" not in manager._tasks[queued]
     # 队列已消费
     assert manager._tasks["t1"]["queued_next"] == []
+
+
+def test_a_recurring_template_is_not_a_queue_anchor(monkeypatch):
+    """模板是日程，不是正在跑的任务：挂在它下面的任务永远等不到启动。
+
+    准入检查只认 active 状态，所以只有「检查时有活跃任务、入队时它恰好结束」
+    这个竞态才会把模板当锚任务 —— 一旦发生，那个排队项就永久卡死。
+    """
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    manager._tasks.clear()
+    manager._tasks["tpl"] = {
+        "task_id": "tpl",
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "recurring",
+        "message": "",
+        "current_task": "recurring",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+    }
+    monkeypatch.setattr(manager, "_run_task_worker_guarded", lambda *a, **k: None)
+
+    task_id = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    assert manager._tasks["tpl"].get("queued_next") in (None, []), "模板不该被当作锚任务"
+    assert manager._tasks[task_id]["status"] == "pending", "必须降级成普通启动"
+
+
+def test_stopping_a_queued_task_cancels_it_and_detaches_it(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    result = manager.stop_task("u1", queued)
+
+    assert result["status"] == "cancelled"
+    assert manager._tasks[queued]["status"] == "cancelled"
+    assert manager._tasks[queued]["message"] == "Queued task cancelled"
+    # 从链里摘掉，否则锚任务结束时它还会被拉起来
+    assert manager._tasks["t1"]["queued_next"] == []
+
+
+def test_stopping_the_anchor_cancels_its_queued_children(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    first = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+    second = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+    # 锚任务用「定时中」这条会走状态变更分支的路径，避免拉起真实的 worker 停止。
+    manager._tasks["t1"]["status"] = "scheduled"
+
+    manager.stop_task("u1", "t1")
+
+    assert manager._tasks[first]["status"] == "cancelled"
+    assert manager._tasks[second]["status"] == "cancelled"
+    assert manager._tasks["t1"]["queued_next"] == []
+
+
+def test_resume_and_pause_reject_a_queued_task(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    resumed = manager.resume_task("u1", queued)
+    paused = manager.pause_task("u1", queued)
+
+    # 409 语义（invalid_status），不是误导性的 404 "Task not found"
+    assert resumed["status"] == "error"
+    assert resumed["code"] == "invalid_status"
+    assert paused["status"] == "error"
+    assert paused["code"] == "invalid_status"
+
+
+def test_restore_drops_queued_children_of_a_finished_anchor(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+    # 服务重启：锚任务已经在停机前结束，收尾逻辑没机会跑
+    manager._tasks["t1"]["status"] = "completed"
+
+    with manager._lock:
+        requests = manager._cancel_stalled_queued_locked()
+    for request in requests:
+        manager._persist_task_state(*request)
+
+    assert manager._tasks[queued]["status"] == "cancelled"
+    assert "gone" in manager._tasks[queued]["message"]
+
+
+def test_hiding_a_queued_task_is_refused(monkeypatch):
+    """隐身会让排队项从列表消失却仍在链里，之后突然开始、没人知道它哪来的。"""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    result = manager.hide_task("u1", queued)
+
+    assert result["status"] == "error"
+    assert result.get("code") == "invalid_status"
+    assert manager._tasks[queued]["status"] == "queued"
+
+
+def test_restore_drops_children_queued_behind_a_recurring_template(monkeypatch):
+    """模板永远不会结束，挂在它下面的排队项等不到任何东西。
+
+    这正是线上那个卡死的 252730c2：入队时抢在活跃任务结束的瞬间，锚定到了
+    周期模板上，于是既不会启动、也无法取消。
+    """
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    manager._tasks.clear()
+    manager._tasks["tpl"] = {
+        "task_id": "tpl",
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "recurring",
+        "message": "",
+        "current_task": "recurring",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "queued_next": [
+            {"task_id": "ghost", "payload": {"platform": "chaoxing"}, "repeat": "once", "enqueued_at": ""}
+        ],
+    }
+    manager._tasks["ghost"] = {
+        "task_id": "ghost",
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "queued",
+        "message": "",
+        "current_task": "queued",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "queue_anchor": "tpl",
+    }
+
+    with manager._lock:
+        requests = manager._cancel_stalled_queued_locked()
+    for request in requests:
+        manager._persist_task_state(*request)
+
+    assert manager._tasks["ghost"]["status"] == "cancelled"
+    assert "gone" in manager._tasks["ghost"]["message"]
+
+
+def test_a_live_anchor_keeps_its_queued_children(monkeypatch):
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _running_task(manager, "t1")
+    queued = manager.start_task("u1", {"platform": "chaoxing", "queue_behind": True})
+
+    with manager._lock:
+        requests = manager._cancel_stalled_queued_locked()
+
+    assert requests == []
+    assert manager._tasks[queued]["status"] == "queued"
 
 
 def test_finishing_a_task_with_empty_queue_does_nothing(monkeypatch):
