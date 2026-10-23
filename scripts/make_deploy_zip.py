@@ -28,13 +28,14 @@ DEFAULT_OUT = 'uh-deploy-src.zip'
 
 # Files that decide whether deploy_server.sh tries to download from GitHub.
 # `resolve_repo_root()` (deploy_server.sh:184-201) checks exactly these; when
-# all four exist the script uses the current directory and never downloads.
-# The one-command path (docker-compose.yml + one_command_deploy.sh) needs its
-# own files present too.
+# they all exist the script uses the current directory and never downloads.
+# `scripts/one_command_deploy.sh` is deliberately absent: it is now a stub that
+# exits 1 (its docker-compose.yml / shuake-easy-learning-* assumptions stopped
+# matching the /www/wwwroot/uh layout), so requiring it would only fail the
+# archive for no reason.
 GUARD_FILES = (
     'docker-compose.release.yml',
     'docker-compose.yml',
-    'scripts/one_command_deploy.sh',
     'database/00-schema.sql',
     'database/02-bootstrap-tenant-template.sh',
     'database/templates/tenant_template.sql',
@@ -137,9 +138,11 @@ def build(out_path: str) -> int:
         print('\nFAILED: %d problem(s): %s' % (len(problems), ', '.join(problems)), file=sys.stderr)
         return 1
     print('\nAll checks passed. Upload this zip to the server, unzip it into a directory')
-    print('(the archive has no top-level folder), then run ONE of:')
-    print('  bash scripts/one_command_deploy.sh        # standard compose, recommended')
+    print('(the archive has no top-level folder), then build and start from source:')
     print('  bash scripts/deploy_server.sh --build --host <SERVER_IP> --admin-email <EMAIL> -y')
+    print('\nNote: servers that already run the image-based layout (/www/wwwroot/uh with')
+    print('compose.yml) do not need this archive -- update those with')
+    print('`docker compose up -d`, or see 镜像上传部署教程.md when the registry is unreachable.')
     return 0
 
 

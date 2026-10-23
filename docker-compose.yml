@@ -1,4 +1,13 @@
-# 标准部署栈 —— 从本地源码构建，不依赖任何预构建镜像。
+# 从本地源码构建的独立部署栈 —— 不是生产服务器上跑的那份。
+#
+# ⚠️ 不要和 compose.yml 在同一台机器上同时运行。
+#    本文件写死了 container_name: shuake-easy-learning-{app,web,db}，
+#    而 /www/wwwroot/uh 用的是 compose.yml（项目名 uh，容器 uh-app-1 / uh-web-1 /
+#    uh-postgres-1，镜像来自 ghcr.io/dabai214109）。两者会创建同名端口的第二套
+#    容器，直接抢端口失败，或者让你以为「更新了」其实起的是另一套空库。
+#
+# 生产更新请走 更新手册.md（docker compose up -d），拉不动镜像走
+# 镜像上传部署教程.md。本文件只适合：一台干净的开发/测试机，从源码构建。
 #
 # 一键启动：
 #   docker compose up -d --build
