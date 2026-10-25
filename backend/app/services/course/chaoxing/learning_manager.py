@@ -147,6 +147,16 @@ def _parse_course_selector(raw: str) -> tuple[str, str | None, str | None]:
     return parts[0], None, None
 
 
+def _idle_run_completed(failed_courses: int, idle: dict[str, int]) -> bool:
+    """True when a run looked at chapters but none of them needed work.
+
+    "Looked at" matters: a run that fetched no chapters at all is not evidence
+    that the course is finished, so `total == 0` is not idle.
+    """
+    total = int(idle.get("total") or 0)
+    return failed_courses == 0 and total > 0 and int(idle.get("skipped") or 0) == total
+
+
 def _as_positive_int(value: object) -> int:
     """Best-effort positive int; 0 when unset or malformed."""
     try:
@@ -1646,6 +1656,9 @@ class ChaoxingLearningManager:
 
         completed_courses = 0
         failed_courses = 0
+        # Chapters that needed no work because they were already complete, and how
+        # many this run looked at. A run with skipped == total is idle.
+        idle_run = {"skipped": 0, "total": 0}
 
         for index, course in enumerate(selected_courses, start=1):
             if stop_event.is_set():
@@ -1689,6 +1702,12 @@ class ChaoxingLearningManager:
 
             callback_lock = threading.Lock()
             last_video_tick = {"ts": 0.0}
+
+            def chapter_skipped_callback(_: dict[str, Any], point: dict[str, Any]) -> None:
+                # Chapters run concurrently, so count under the same lock as the
+                # other counters.
+                with callback_lock:
+                    idle_run["skipped"] += 1
 
             def chapter_start_callback(_: dict[str, Any], point: dict[str, Any]) -> None:
                 if stop_event.is_set():
@@ -1741,12 +1760,14 @@ class ChaoxingLearningManager:
             run_config = dict(common_config)
             run_config["chapter_start_callback"] = chapter_start_callback
             run_config["chapter_done_callback"] = chapter_done_callback
+            run_config["chapter_skipped_callback"] = chapter_skipped_callback
             run_config["video_progress_callback"] = video_progress_callback
             run_config["should_stop"] = stop_event.is_set
 
             try:
                 processor = JobProcessor(chaoxing, course, chapter_tasks, run_config)
                 processor.run()
+                idle_run["total"] += len(chapter_tasks)
                 if stop_event.is_set():
                     self._cancel_task(task_id)
                     return
@@ -1779,6 +1800,13 @@ class ChaoxingLearningManager:
             self._cancel_task(task_id)
             return
 
+        # Idle run: every chapter of every selected course was already complete,
+        # so this occurrence did nothing. Firing the same no-op again tomorrow (and,
+        # with no usable question bank, writing another batch of random drafts) has
+        # no value -- stop the template and say why.
+        if _idle_run_completed(failed_courses, idle_run):
+            self._stop_idle_recurring_parent(task_id)
+
         if failed_courses > 0:
             summary = f"Task finished with failures ({failed_courses} failed courses)"
             self._update_task(
@@ -1799,6 +1827,44 @@ class ChaoxingLearningManager:
             self._append_task_log(task_id, "Task completed", "success")
 
         self._send_completion_notification(task_id, notify_config, summary)
+
+    def _stop_idle_recurring_parent(self, task_id: str) -> None:
+        """Cancel the recurring template behind a run that had nothing to do.
+
+        Only a recurring child carries ``schedule["parent_task_id"]``, so one-shot
+        and manual runs are untouched.
+        """
+        with self._lock:
+            task = self._tasks.get(task_id)
+            schedule = task.get("schedule") if isinstance(task, dict) else None
+            parent_id = str((schedule or {}).get("parent_task_id") or "").strip()
+            user_id = str((task or {}).get("user_id") or "").strip()
+        if not parent_id or not user_id:
+            return
+        reason = "Recurring schedule stopped: every selected chapter was already complete"
+        result = self.stop_task(user_id, parent_id)
+        if result.get("status") == "cancelled":
+            # stop_task names a manual cancellation; say what actually happened so
+            # the card does not look like somebody cancelled it by hand.
+            with self._lock:
+                parent = self._tasks.get(parent_id)
+                request = None
+                if parent is not None:
+                    parent["message"] = reason
+                    parent["updated_at"] = _utc_now_iso()
+                    request = self._prepare_persist_locked(parent)
+            if request:
+                self._persist_task_state(*request)
+            self._append_task_log(parent_id, reason, "info")
+        else:
+            # Already finished/cancelled, or no longer present: nothing to do, but
+            # leave a trace so a future investigation knows it was considered.
+            logger.info(
+                "idle recurring parent not stopped: task=%s parent=%s result=%s",
+                task_id,
+                parent_id,
+                result.get("status"),
+            )
 
     def _send_completion_notification(
         self,

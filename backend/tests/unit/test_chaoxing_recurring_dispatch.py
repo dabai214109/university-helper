@@ -714,3 +714,64 @@ def test_the_earlier_of_stop_at_and_the_cap_wins(monkeypatch):
 
     remaining = (datetime.fromisoformat(task["schedule"]["actual_stop_at"]) - datetime.now(UTC)).total_seconds() / 60
     assert 9 <= remaining <= 11, "两个限制都不能被突破，取更早的那个"
+
+
+# ── idle runs: a schedule with nothing left to do must stop itself ───────────
+
+
+def _recurring_child(manager, *, child_id="child-1", parent_id="tpl-1"):
+    manager._tasks[child_id] = {
+        "task_id": child_id,
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "completed",
+        "message": "Task completed",
+        "current_task": "finished",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+        "schedule": {"repeat": "daily", "parent_task_id": parent_id, "actual_stop_at": None},
+    }
+    return manager._tasks[child_id]
+
+
+def test_an_idle_run_stops_its_recurring_schedule(monkeypatch):
+    """什么都不用做时，每天再跑一遍只会重复空转（还会写随机草稿）。"""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _recurring_child(manager)
+    _template(manager, task_id="tpl-1")
+
+    manager._stop_idle_recurring_parent("child-1")
+
+    assert manager._tasks["tpl-1"]["status"] == "cancelled"
+    assert "already complete" in manager._tasks["tpl-1"]["message"].lower()
+
+
+def test_a_manual_run_has_no_schedule_to_stop(monkeypatch):
+    """手动任务没有 parent_task_id，不能被误停。"""
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    manager._tasks["manual-1"] = {
+        "task_id": "manual-1",
+        "user_id": "u1",
+        "platform": "chaoxing",
+        "status": "completed",
+        "message": "Task completed",
+        "current_task": "finished",
+        "progress": manager._default_progress(),
+        "logs": [],
+        "_log_cursor": 0,
+    }
+
+    manager._stop_idle_recurring_parent("manual-1")
+
+    assert manager._tasks["manual-1"]["status"] == "completed"
+
+
+def test_idle_predicate_requires_every_chapter_to_have_been_skipped():
+    idle = lm._idle_run_completed
+    assert idle(0, {"skipped": 5, "total": 5}) is True
+    assert idle(0, {"skipped": 4, "total": 5}) is False, "有章节真的做了，不算空转"
+    assert idle(0, {"skipped": 0, "total": 0}) is False, "没取到章节不代表课程已完成"
+    assert idle(1, {"skipped": 5, "total": 5}) is False, "有失败课程时不该停调度"

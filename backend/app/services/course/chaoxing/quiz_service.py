@@ -270,7 +270,9 @@ class QuizAnswerProcessor:
             for q in questions["questions"]:
                 self.handle_question(q, inc_found_seq, origin_html_content)
 
-        cover_rate = (found_answers / total_questions) * 100
+        # A quiz page with no questions (or one we failed to parse) used to divide
+        # by zero here and take the whole chapter down.
+        cover_rate = (found_answers / total_questions) * 100 if total_questions else 0.0
         logger.info(f"章节检测题库覆盖率： {cover_rate:.0f}%")
         return cover_rate
 
@@ -322,6 +324,15 @@ class ChaoxingQuizService:
 
         processor = QuizAnswerProcessor(self.tiku, self.kwargs)
         cover_rate = processor.process_questions(questions, origin_html_content)
+
+        if questions.get("questions") and cover_rate <= 0:
+            # Not a single question matched. Filling random answers and saving them
+            # only writes wrong answers into the draft the user may later answer by
+            # hand, and the quiz can never be submitted at 0% anyway. Leave it
+            # untouched -- this matters most for recurring schedules, which would
+            # otherwise deposit a fresh batch of junk every morning.
+            logger.info("章节检测一题未命中，跳过本次作答（不写草稿）")
+            return True
 
         if self.tiku.get_submit_params() == "1":
             questions["pyFlag"] = "1"

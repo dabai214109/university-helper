@@ -838,6 +838,16 @@ def process_chapter(
                 logger.debug(f"调用 chapter_start_callback 时出错: {e}")
     if point["has_finished"]:
         logger.info(f'章节：{point["title"]} 已完成所有任务点')
+        # Optional hook so the caller can tell an idle run (every chapter was
+        # already complete) from a productive one. Without it a recurring
+        # schedule has no way to notice that there is nothing left to do.
+        if config is not None:
+            skipped_cb = config.get("chapter_skipped_callback")
+            if callable(skipped_cb):
+                try:
+                    skipped_cb(course, point)
+                except Exception as e:
+                    logger.debug(f"调用 chapter_skipped_callback 时出错: {e}")
         # 该章节在超星端已标记完成：必须计入"已完成章节"统计。learning_manager
         # 把所有章节(含已完成)都加进 total_chapters，而 completed_chapters 只在
         # chapter_done_callback 里累加；若此处直接 return 而不回调，预先完成的章节
