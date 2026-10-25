@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import threading
 import time
@@ -145,6 +146,23 @@ def _parse_course_selector(raw: str) -> tuple[str, str | None, str | None]:
     if len(parts) == 2:
         return parts[0], parts[1], None
     return parts[0], None, None
+
+
+# How many consecutive runs with nothing to do before a recurring schedule stops
+# itself. 1 stops the morning after the courses finish; raise it (env var) when a
+# course may briefly report everything complete between chapter releases.
+_IDLE_RUNS_BEFORE_STOP_DEFAULT = 1
+
+
+def _idle_runs_before_stop() -> int:
+    raw = os.environ.get("RECURRING_IDLE_RUNS_BEFORE_STOP")
+    if raw is None or not str(raw).strip():
+        return _IDLE_RUNS_BEFORE_STOP_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _IDLE_RUNS_BEFORE_STOP_DEFAULT
+    return value if value > 0 else _IDLE_RUNS_BEFORE_STOP_DEFAULT
 
 
 def _idle_run_completed(failed_courses: int, idle: dict[str, int]) -> bool:
@@ -1805,7 +1823,9 @@ class ChaoxingLearningManager:
         # with no usable question bank, writing another batch of random drafts) has
         # no value -- stop the template and say why.
         if _idle_run_completed(failed_courses, idle_run):
-            self._stop_idle_recurring_parent(task_id)
+            self._note_idle_run(task_id)
+        else:
+            self._reset_idle_run_counter(task_id)
 
         if failed_courses > 0:
             summary = f"Task finished with failures ({failed_courses} failed courses)"
@@ -1828,20 +1848,53 @@ class ChaoxingLearningManager:
 
         self._send_completion_notification(task_id, notify_config, summary)
 
-    def _stop_idle_recurring_parent(self, task_id: str) -> None:
-        """Cancel the recurring template behind a run that had nothing to do.
-
-        Only a recurring child carries ``schedule["parent_task_id"]``, so one-shot
-        and manual runs are untouched.
-        """
+    def _recurring_parent_id(self, task_id: str) -> tuple[str, str]:
+        """(parent template id, owner user id) for a recurring child, else ("", "")."""
         with self._lock:
             task = self._tasks.get(task_id)
             schedule = task.get("schedule") if isinstance(task, dict) else None
             parent_id = str((schedule or {}).get("parent_task_id") or "").strip()
             user_id = str((task or {}).get("user_id") or "").strip()
+        return parent_id, user_id
+
+    def _note_idle_run(self, task_id: str) -> None:
+        """Count a run that found nothing to do; stop the schedule once it adds up.
+
+        A single idle run is weak evidence: a course can momentarily report every
+        chapter complete between chapter releases. Counting consecutive idle runs
+        (RECURRING_IDLE_RUNS_BEFORE_STOP, default 1) makes the stop configurable
+        without hiding the state -- each idle run is logged with its count.
+        """
+        parent_id, user_id = self._recurring_parent_id(task_id)
         if not parent_id or not user_id:
             return
-        reason = "Recurring schedule stopped: every selected chapter was already complete"
+
+        threshold = _idle_runs_before_stop()
+        with self._lock:
+            parent = self._tasks.get(parent_id)
+            idle_runs = 0
+            request = None
+            if parent is not None and is_recurring_status(parent.get("status")):
+                schedule = parent.get("schedule")
+                if isinstance(schedule, dict):
+                    idle_runs = int(schedule.get("idle_runs") or 0) + 1
+                    schedule["idle_runs"] = idle_runs
+                    parent["updated_at"] = _utc_now_iso()
+                    request = self._prepare_persist_locked(parent)
+        if request:
+            self._persist_task_state(*request)
+
+        if idle_runs < threshold:
+            self._append_task_log(
+                parent_id,
+                f"Idle run {idle_runs}/{threshold}: nothing left to do, schedule kept",
+                "info",
+            )
+            return
+
+        reason = (
+            f"Recurring schedule stopped after {idle_runs} idle run(s): " "every selected chapter was already complete"
+        )
         result = self.stop_task(user_id, parent_id)
         if result.get("status") == "cancelled":
             # stop_task names a manual cancellation; say what actually happened so
@@ -1857,14 +1910,30 @@ class ChaoxingLearningManager:
                 self._persist_task_state(*request)
             self._append_task_log(parent_id, reason, "info")
         else:
-            # Already finished/cancelled, or no longer present: nothing to do, but
-            # leave a trace so a future investigation knows it was considered.
             logger.info(
                 "idle recurring parent not stopped: task=%s parent=%s result=%s",
                 task_id,
                 parent_id,
                 result.get("status"),
             )
+
+    def _reset_idle_run_counter(self, task_id: str) -> None:
+        """A productive run clears the consecutive-idle streak."""
+        parent_id, _ = self._recurring_parent_id(task_id)
+        if not parent_id:
+            return
+        with self._lock:
+            parent = self._tasks.get(parent_id)
+            if parent is None:
+                return
+            schedule = parent.get("schedule")
+            if not isinstance(schedule, dict) or not schedule.get("idle_runs"):
+                return
+            schedule["idle_runs"] = 0
+            parent["updated_at"] = _utc_now_iso()
+            request = self._prepare_persist_locked(parent)
+        if request:
+            self._persist_task_state(*request)
 
     def _send_completion_notification(
         self,

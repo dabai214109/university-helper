@@ -742,7 +742,7 @@ def test_an_idle_run_stops_its_recurring_schedule(monkeypatch):
     _recurring_child(manager)
     _template(manager, task_id="tpl-1")
 
-    manager._stop_idle_recurring_parent("child-1")
+    manager._note_idle_run("child-1")
 
     assert manager._tasks["tpl-1"]["status"] == "cancelled"
     assert "already complete" in manager._tasks["tpl-1"]["message"].lower()
@@ -764,9 +764,52 @@ def test_a_manual_run_has_no_schedule_to_stop(monkeypatch):
         "_log_cursor": 0,
     }
 
-    manager._stop_idle_recurring_parent("manual-1")
+    manager._note_idle_run("manual-1")
 
     assert manager._tasks["manual-1"]["status"] == "completed"
+
+
+def test_idle_threshold_keeps_the_schedule_on_the_first_idle_run(monkeypatch):
+    """阈值设为 2 时，第一次空转只记录，第二次才停。"""
+    monkeypatch.setenv("RECURRING_IDLE_RUNS_BEFORE_STOP", "2")
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _recurring_child(manager)
+    _template(manager, task_id="tpl-1")
+
+    manager._note_idle_run("child-1")
+    assert manager._tasks["tpl-1"]["status"] == "recurring", "第一次空转不应停"
+    assert manager._tasks["tpl-1"]["schedule"]["idle_runs"] == 1
+
+    manager._note_idle_run("child-1")
+    assert manager._tasks["tpl-1"]["status"] == "cancelled", "连续第二次空转才停"
+    assert "2 idle run" in manager._tasks["tpl-1"]["message"]
+
+
+def test_a_productive_run_resets_the_idle_streak(monkeypatch):
+    monkeypatch.setenv("RECURRING_IDLE_RUNS_BEFORE_STOP", "2")
+    manager = _make_manager()
+    _noop_store(monkeypatch)
+    _recurring_child(manager)
+    _template(manager, task_id="tpl-1")
+
+    manager._note_idle_run("child-1")
+    assert manager._tasks["tpl-1"]["schedule"]["idle_runs"] == 1
+
+    manager._reset_idle_run_counter("child-1")
+    assert manager._tasks["tpl-1"]["schedule"]["idle_runs"] == 0
+
+    manager._note_idle_run("child-1")
+    assert manager._tasks["tpl-1"]["status"] == "recurring", "清零后重新计数"
+
+
+def test_the_idle_threshold_defaults_to_one(monkeypatch):
+    monkeypatch.delenv("RECURRING_IDLE_RUNS_BEFORE_STOP", raising=False)
+    assert lm._idle_runs_before_stop() == 1
+    monkeypatch.setenv("RECURRING_IDLE_RUNS_BEFORE_STOP", "garbage")
+    assert lm._idle_runs_before_stop() == 1, "非法值回退默认"
+    monkeypatch.setenv("RECURRING_IDLE_RUNS_BEFORE_STOP", "0")
+    assert lm._idle_runs_before_stop() == 1, "0 表示非法，回退默认"
 
 
 def test_idle_predicate_requires_every_chapter_to_have_been_skipped():
