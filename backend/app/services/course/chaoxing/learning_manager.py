@@ -166,13 +166,20 @@ def _idle_runs_before_stop() -> int:
 
 
 def _idle_run_completed(failed_courses: int, idle: dict[str, int]) -> bool:
-    """True when a run looked at chapters but none of them needed work.
+    """True when a run examined chapters but achieved nothing at all.
 
-    "Looked at" matters: a run that fetched no chapters at all is not evidence
-    that the course is finished, so `total == 0` is not idle.
+    "Achieved nothing" is about results, not about which code path ran: a chapter
+    whose tasks are already complete and a quiz that matched zero questions both
+    produce no value. Judging by results is what the user means by "it finished,
+    so stop the schedule" -- a run can walk every chapter and still be worthless.
+
+    "Examined chapters" matters: a run that fetched no chapters is not evidence
+    that the course is finished, so ``total == 0`` never counts as idle.
     """
     total = int(idle.get("total") or 0)
-    return failed_courses == 0 and total > 0 and int(idle.get("skipped") or 0) == total
+    if failed_courses > 0 or total <= 0:
+        return False
+    return int(idle.get("answers") or 0) == 0 and int(idle.get("work") or 0) == 0
 
 
 def _as_positive_int(value: object) -> int:
@@ -1674,9 +1681,9 @@ class ChaoxingLearningManager:
 
         completed_courses = 0
         failed_courses = 0
-        # Chapters that needed no work because they were already complete, and how
-        # many this run looked at. A run with skipped == total is idle.
-        idle_run = {"skipped": 0, "total": 0}
+        # Chapters that needed no work because they were already complete, how many
+        # this run looked at, and whether anything was actually achieved.
+        idle_run = {"skipped": 0, "total": 0, "quizzes": 0, "answers": 0, "work": 0}
 
         for index, course in enumerate(selected_courses, start=1):
             if stop_event.is_set():
@@ -1727,6 +1734,13 @@ class ChaoxingLearningManager:
                 with callback_lock:
                     idle_run["skipped"] += 1
 
+            def quiz_result_callback(found_answers: int, total_questions: int) -> None:
+                # A quiz that matched nothing produced no value even though its
+                # chapter was processed rather than skipped.
+                with callback_lock:
+                    idle_run["quizzes"] += 1
+                    idle_run["answers"] += int(found_answers or 0)
+
             def chapter_start_callback(_: dict[str, Any], point: dict[str, Any]) -> None:
                 if stop_event.is_set():
                     return
@@ -1761,6 +1775,12 @@ class ChaoxingLearningManager:
                 if not pause_event.is_set():
                     self._wait_for_resume(task_id, pause_event, stop_event)
                 now = time.time()
+                if play_time and play_time > 0:
+                    # Any real playback means this run did work, even if it later
+                    # stops early. Counted before the throttle so a short run is
+                    # not mistaken for an idle one.
+                    with callback_lock:
+                        idle_run["work"] += 1
                 with callback_lock:
                     if now - last_video_tick["ts"] < 0.8:
                         return
@@ -1779,6 +1799,7 @@ class ChaoxingLearningManager:
             run_config["chapter_start_callback"] = chapter_start_callback
             run_config["chapter_done_callback"] = chapter_done_callback
             run_config["chapter_skipped_callback"] = chapter_skipped_callback
+            run_config["quiz_result_callback"] = quiz_result_callback
             run_config["video_progress_callback"] = video_progress_callback
             run_config["should_stop"] = stop_event.is_set
 

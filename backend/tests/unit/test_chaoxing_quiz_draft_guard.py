@@ -89,3 +89,36 @@ def test_partial_coverage_still_submits_or_saves(monkeypatch):
     service.study_work(_course(), job, info)
 
     assert filled, "有命中时仍应写入表单"
+
+
+def test_the_quiz_reports_its_yield_to_the_caller(monkeypatch):
+    """The manager needs the yield to tell an idle run from a productive one.
+
+    Uses the REAL QuizAnswerProcessor.process_questions so the reporting line is
+    actually exercised (stubbing it out would assert nothing).
+    """
+    seen = []
+    real = qs.QuizAnswerProcessor
+
+    def _processor(tiku, kwargs):
+        # Real class, but a tiku whose query always misses: zero yield.
+        class _MissTiku(_Tiku):
+            def query(self, q):
+                return None
+
+        return real(_MissTiku(), kwargs)
+
+    monkeypatch.setattr(qs, "decode_questions_info", lambda html: dict(_QUESTIONS))
+    monkeypatch.setattr(qs, "QuizAnswerProcessor", _processor)
+    service = qs.ChaoxingQuizService(
+        tiku=_Tiku(),
+        rollback_times=0,
+        kwargs={"quiz_result_callback": lambda found, total: seen.append((found, total))},
+        session_manager=_SessionManager(),
+    )
+
+    job, info = _job()
+    service.study_work(_course(), job, info)
+
+    assert seen, "必须把本轮命中数上报给调用方"
+    assert seen[0] == (0, 1), "0 道命中 / 共 1 道题"

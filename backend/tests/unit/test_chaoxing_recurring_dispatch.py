@@ -812,9 +812,23 @@ def test_the_idle_threshold_defaults_to_one(monkeypatch):
     assert lm._idle_runs_before_stop() == 1, "0 表示非法，回退默认"
 
 
-def test_idle_predicate_requires_every_chapter_to_have_been_skipped():
+def test_idle_predicate_judges_by_result_not_by_code_path():
+    """判据是「有没有成果」，而不是「有没有进入执行流程」。
+
+    章节任务已完成（跳过）和测验一题未命中（执行了但零收获）都是空转；
+    线上就出现过「章节全跳过 + 测验零命中」却被判成有活干的情况。
+    """
     idle = lm._idle_run_completed
-    assert idle(0, {"skipped": 5, "total": 5}) is True
-    assert idle(0, {"skipped": 4, "total": 5}) is False, "有章节真的做了，不算空转"
-    assert idle(0, {"skipped": 0, "total": 0}) is False, "没取到章节不代表课程已完成"
-    assert idle(1, {"skipped": 5, "total": 5}) is False, "有失败课程时不该停调度"
+
+    # 全部跳过、测验也零命中 → 空转
+    assert idle(0, {"total": 5, "skipped": 5, "quizzes": 0, "answers": 0, "work": 0}) is True
+    # 有章节执行了测验但零命中 → 仍是空转（这正是线上的情形）
+    assert idle(0, {"total": 5, "skipped": 3, "quizzes": 2, "answers": 0, "work": 0}) is True
+    # 命中过题目 → 有成果
+    assert idle(0, {"total": 5, "skipped": 3, "quizzes": 2, "answers": 4, "work": 0}) is False
+    # 播过视频 → 有成果
+    assert idle(0, {"total": 5, "skipped": 5, "quizzes": 0, "answers": 0, "work": 12}) is False
+    # 一个章节都没取到 → 不能推断课程已完成
+    assert idle(0, {"total": 0, "skipped": 0, "quizzes": 0, "answers": 0, "work": 0}) is False
+    # 有失败课程 → 可能是临时故障，明天该重试
+    assert idle(1, {"total": 5, "skipped": 5, "quizzes": 0, "answers": 0, "work": 0}) is False

@@ -274,6 +274,14 @@ class QuizAnswerProcessor:
         # by zero here and take the whole chapter down.
         cover_rate = (found_answers / total_questions) * 100 if total_questions else 0.0
         logger.info(f"章节检测题库覆盖率： {cover_rate:.0f}%")
+        # Report this quiz's yield so the caller can tell a run that achieved
+        # nothing from one that did work. An empty quiz counts as no yield.
+        report = self.kwargs.get("quiz_result_callback")
+        if callable(report):
+            try:
+                report(found_answers, total_questions)
+            except Exception:
+                logger.debug("quiz_result_callback 调用失败", exc_info=True)
         return cover_rate
 
 
